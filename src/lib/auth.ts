@@ -1,4 +1,4 @@
-import { NextResponse, type NextRequest } from 'next/server';
+import { type NextRequest } from 'next/server';
 import jwt, { type JwtPayload } from 'jsonwebtoken';
 
 // This is the "Guard" function
@@ -15,23 +15,20 @@ export function verifyAuth(request: NextRequest) {
         // 2. Get the Authorization header from the request
         const authHeader = request.headers.get('Authorization');
         if (!authHeader) {
-            console.warn('Missing Authorization header');
             return null;
         }
 
         // 3. Check if it's a Bearer token
         const token = authHeader.split(' ')[1];
         if (!token) {
-            console.warn('Malformed Authorization header');
             return null;
         }
 
         // 4. Verify the token using the secret key
-        // This will throw an error if the token is expired or invalid
         const decoded = jwt.verify(token, secret) as JwtPayload;
 
         // 5. Return the decoded user payload
-        return decoded; // This will be { id: 123, email: '...', name: '...' }
+        return decoded; 
 
     } catch (error) {
         console.error('Auth Error:', error);

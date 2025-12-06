@@ -1,27 +1,37 @@
-import mysql from 'mysql2/promise';
+import { type NextRequest } from 'next/server';
+import jwt, { type JwtPayload } from 'jsonwebtoken';
 
-// 1. We define the config in ONE place
-const dbConfig = {
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    // 2. THIS IS THE FIX:
-    // We check if the password exists in .env.local. 
-    // If it doesn't, we explicitly tell mysql to use a blank string "".
-    password: process.env.DB_PASSWORD || "", 
-    database: process.env.DB_DATABASE,
-};
-
-console.log(dbConfig,'000000000000')
-
-// 3. We create a reusable function to get a connection
-export async function getConnection() {
+// This is the "Guard" function
+// It checks the token and returns the user's data if valid
+export function verifyAuth(request: NextRequest) {
     try {
-        const connection = await mysql.createConnection(dbConfig);
-        return connection;
-    } catch (error: any) {
-        console.error("--- DATABASE CONNECTION FAILED ---");
-        console.error("Error:", error.message);
-        // This will now show a clear error if the DB_USER or DB_HOST is wrong
-        throw new Error("Failed to connect to the database. Check server .env.local and MySQL settings.");
+        // 1. Get the secret key from environment variables
+        const secret = process.env.JWT_SECRET;
+        if (!secret) {
+            console.error('JWT_SECRET is not defined');
+            return null;
+        }
+
+        // 2. Get the Authorization header from the request
+        const authHeader = request.headers.get('Authorization');
+        if (!authHeader) {
+            return null;
+        }
+
+        // 3. Check if it's a Bearer token
+        const token = authHeader.split(' ')[1];
+        if (!token) {
+            return null;
+        }
+
+        // 4. Verify the token using the secret key
+        const decoded = jwt.verify(token, secret) as JwtPayload;
+
+        // 5. Return the decoded user payload
+        return decoded; 
+
+    } catch (error) {
+        console.error('Auth Error:', error);
+        return null;
     }
 }
