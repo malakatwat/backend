@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { getConnection } from '@/lib/db';
 import { verifyAuth } from '@/lib/auth';
+import { RowDataPacket } from 'mysql2'; // 1. Import RowDataPacket
 
 // --- CRITICAL: Get your Gemini API Key ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
@@ -9,14 +10,18 @@ const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/
 // Helper to get user context for the AI
 async function getUserContext(userId: number) {
     const connection = await getConnection();
-    const [userRows] = await connection.execute(
+    
+    // 2. FIX: Explicitly type the query result
+    const [userRows] = await connection.execute<RowDataPacket[]>(
         `SELECT goal, age, current_weight, target_weight, gender, activity_level, height FROM users WHERE id = ?`,
         [userId]
     );
     await connection.end();
 
-    const userProfile = userRows[0] as any;
-    // Simple logic for target calories (replace with real calculation if needed)
+    // 3. Safe access with fallback
+    const userProfile = userRows.length > 0 ? userRows[0] : {} as any;
+    
+    // Simple logic for target calories
     const targetCalories = userProfile?.goal === 'lose_weight' ? 1800 : 2500;
     
     return {
@@ -34,7 +39,7 @@ async function getAiReply(userId: number, query: string): Promise<string> {
     const context = await getUserContext(userId);
 
     const systemPrompt = `
-        You are 'Dr. Malak', a friendly, certified clinical dietitian.
+        You are 'Dr. Sarah', a friendly, certified clinical dietitian.
         User's Goal: ${context.profile.goal}.
         User's Target: ${context.targetCalories} kcal.
         
@@ -75,8 +80,7 @@ export async function GET(request: NextRequest) {
 
     const connection = await getConnection();
     
-    // Get all messages for this user (either FROM user or TO user)
-    // We treat ID 0 as the "AI Dietitian"
+    // Get all messages for this user
     const sql = `
       SELECT * FROM messages 
       WHERE (sender_id = ? AND receiver_id = 0) 
@@ -84,25 +88,26 @@ export async function GET(request: NextRequest) {
       ORDER BY created_at ASC
     `;
     
-    const [rows] = await connection.execute(sql, [user.id, user.id]);
-    let messages = rows as any[];
+    // Type the messages query result as well
+    const [rows] = await connection.execute<RowDataPacket[]>(sql, [user.id, user.id]);
+    let messages = rows;
 
     // If chat is empty, insert a welcome message
     if (messages.length === 0) {
-        const welcomeMsg = "Hello! I'm Dr. Malak, your AI dietitian. How can I help you today?";
+        const welcomeMsg = "Hello! I'm Dr. Sarah, your AI dietitian. How can I help you today?";
         await connection.execute(
             `INSERT INTO messages (sender_id, receiver_id, message) VALUES (0, ?, ?)`,
             [user.id, welcomeMsg]
         );
         // Fetch again to include the new message
-        const [newRows] = await connection.execute(sql, [user.id, user.id]);
-        messages = newRows as any[];
+        const [newRows] = await connection.execute<RowDataPacket[]>(sql, [user.id, user.id]);
+        messages = newRows;
     }
 
     await connection.end();
     return NextResponse.json({ messages: messages }, { status: 200 });
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Chat API Error:', error);
     return NextResponse.json({ message: 'Server error fetching messages' }, { status: 500 });
   }
@@ -126,7 +131,6 @@ export async function POST(request: NextRequest) {
         );
         
         // 2. Get the AI's Reply
-        // We do this *immediately* in the same request for a fast response
         const aiReply = await getAiReply(user.id, message);
         
         // 3. Save the AI's message
@@ -139,7 +143,7 @@ export async function POST(request: NextRequest) {
 
         return NextResponse.json({ message: 'Sent', reply: aiReply }, { status: 200 });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error('Chat API Error:', error);
         return NextResponse.json({ message: 'Server error sending message' }, { status: 500 });
     }
