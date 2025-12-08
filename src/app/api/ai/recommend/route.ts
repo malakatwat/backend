@@ -16,8 +16,8 @@ async function getUserContext(userId: number) {
         [userId]
     );
 
-    // 3. Safe access: check if we got a row, otherwise use empty object
-    const userProfile = userRows.length > 0 ? userRows[0] : {};
+    // 3. Safe access: check if we got a row, otherwise use empty object BUT cast it to any to avoid TS errors
+    const userProfile = userRows.length > 0 ? userRows[0] : {} as any;
 
     // Mock totals for prototype
     const mockTotals = { calories: 800, protein: 50, carbs: 100, fat: 20 };
@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
         let systemPrompt = `
             You are 'Dr. Sarah', a certified clinical dietitian specialized in Middle Eastern cuisine (Lebanese, Emirati, Bahraini).
             User Profile:
-            - Goal: ${context?.profile?.goal}
+            - Goal: ${context.profile.goal}
             - Stats: ${context.profile.age} yrs, ${context.profile.gender}, ${context.profile.height}cm, ${context.profile.current_weight}kg.
             - Activity: ${context.profile.activity_level}
             - Daily Target: ${context.targetCalories} kcal
