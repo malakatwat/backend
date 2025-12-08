@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { getConnection } from '@/lib/db';
-import { RowDataPacket } from 'mysql2'; // Import type
+import { RowDataPacket } from 'mysql2';
 
 export interface FoodItem {
   id: string;
@@ -24,11 +24,9 @@ async function searchLocalDB(query: string): Promise<FoodItem[]> {
         LIMIT 20
     `;
     
-    // FIX 1: Type the query result
     const [rows] = await connection.execute<RowDataPacket[]>(sql, [`%${query}%`]);
     await connection.end();
     
-    // FIX 2: Map correctly without 'any'
     return rows.map((row) => ({
         id: row.id.toString(),
         name: row.name,
@@ -40,7 +38,7 @@ async function searchLocalDB(query: string): Promise<FoodItem[]> {
         serving_unit: row.serving_unit
     }));
 
-  } catch (error: unknown) { // FIX 3: Use unknown
+  } catch (error: unknown) {
     console.error("Error searching local DB:", error);
     return []; 
   }
@@ -67,16 +65,12 @@ async function searchUsdaAPI(query: string): Promise<FoodItem[]> {
     
     if (!data.foods) return [];
 
-    // FIX 4: Use 'any' only where necessary for external API structure if it's complex, 
-    // but try to be specific or keep it scoped. Here 'any' is okay for the raw external data item 
-    // as long as we validate/map it safely.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const formattedFoods: FoodItem[] = (data.foods as any[])
-      .map((food) => {
-        // Helper to find a specific nutrient by its ID
+    const rawFoods = (data.foods as any[]).map((food) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const getNutrient = (id: number) => food.foodNutrients.find((n: any) => n.nutrientId === id || n.nutrientNumber === id.toString());
 
+        // Use '|| 0' to ensure we always get a number, not undefined
         const calories = getNutrient(1008)?.value || 0;
         const protein = getNutrient(1003)?.value || 0;
         const fat = getNutrient(1004)?.value || 0;
@@ -86,22 +80,26 @@ async function searchUsdaAPI(query: string): Promise<FoodItem[]> {
           return null;
         }
         
-        return {
+        // Explicitly cast this object to FoodItem to satisfy TypeScript
+        const item: FoodItem = {
           id: `usda-${food.fdcId}`, 
           name: food.description,
-          calories: calories,
-          protein: protein,
-          carbs: carbs,
-          fat: fat,
+          calories: Number(calories), // Ensure it's a number
+          protein: Number(protein),
+          carbs: Number(carbs),
+          fat: Number(fat),
           serving_size: 100, 
           serving_unit: 'g', 
         };
-      })
-      .filter((food): food is FoodItem => food !== null); // Type predicate filter
+        return item;
+      });
+
+    // Filter out nulls and tell TypeScript the result is FoodItem[]
+    const formattedFoods: FoodItem[] = rawFoods.filter((item): item is FoodItem => item !== null);
 
     return formattedFoods;
 
-  } catch (error: unknown) { // FIX 5: Use unknown
+  } catch (error: unknown) {
     console.error("Error searching USDA API:", error);
     return [];
   }
@@ -127,7 +125,7 @@ export async function GET(request: NextRequest) {
         
         return NextResponse.json({ foods: combinedResults }, { status: 200 });
 
-    } catch (error: unknown) { // FIX 6: Use unknown
+    } catch (error: unknown) {
         console.error('API Error:', error);
         return NextResponse.json({ message: 'Server error while searching for food' }, { status: 500 });
     }
