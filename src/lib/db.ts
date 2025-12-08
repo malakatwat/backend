@@ -1,37 +1,30 @@
-import { type NextRequest } from 'next/server';
-import jwt, { type JwtPayload } from 'jsonwebtoken';
+import mysql from 'mysql2/promise';
 
-// This is the "Guard" function
-// It checks the token and returns the user's data if valid
-export function verifyAuth(request: NextRequest) {
+// 1. We define the config in ONE place
+const dbConfig = {
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    // 2. THIS IS THE FIX:
+    // We check if the password exists. If not, we explicitly use a blank string "".
+    password: process.env.DB_PASSWORD || "", 
+    database: process.env.DB_DATABASE,
+};
+
+// 3. We create a reusable function to get a connection
+export async function getConnection() {
     try {
-        // 1. Get the secret key from environment variables
-        const secret = process.env.JWT_SECRET;
-        if (!secret) {
-            console.error('JWT_SECRET is not defined');
-            return null;
+        const connection = await mysql.createConnection(dbConfig);
+        return connection;
+    } catch (error: unknown) {
+        console.error("--- DATABASE CONNECTION FAILED ---");
+        
+        // Type check to safely access .message
+        if (error instanceof Error) {
+            console.error("Error:", error.message);
+        } else {
+            console.error("Unknown error occurred during database connection");
         }
-
-        // 2. Get the Authorization header from the request
-        const authHeader = request.headers.get('Authorization');
-        if (!authHeader) {
-            return null;
-        }
-
-        // 3. Check if it's a Bearer token
-        const token = authHeader.split(' ')[1];
-        if (!token) {
-            return null;
-        }
-
-        // 4. Verify the token using the secret key
-        const decoded = jwt.verify(token, secret) as JwtPayload;
-
-        // 5. Return the decoded user payload
-        return decoded; 
-
-    } catch (error) {
-        console.error('Auth Error:', error);
-        return null;
+        
+        throw new Error("Failed to connect to the database. Check server .env.local and MySQL settings.");
     }
 }

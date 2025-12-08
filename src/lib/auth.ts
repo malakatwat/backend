@@ -1,4 +1,4 @@
-import { type NextRequest } from 'next/server';
+import { type NextRequest } from 'next/server'; // Removed NextResponse
 import jwt, { type JwtPayload } from 'jsonwebtoken';
 
 // This is the "Guard" function
