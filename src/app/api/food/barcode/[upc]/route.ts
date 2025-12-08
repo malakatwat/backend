@@ -1,15 +1,13 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { getConnection } from '@/lib/db';
+import { RowDataPacket } from 'mysql2';
 
-// --- THE FIX IS HERE ---
-// In Next.js 15, params is a Promise that resolves to the object.
-// We must type it as Promise<{ upc: string }>
 export async function GET(
     request: NextRequest,
     { params }: { params: Promise<{ upc: string }> } 
 ) {
     try {
-        // 1. Await the params to get the upc
+        // Await the params (Next.js 15 requirement)
         const { upc } = await params;
         
         if (!upc) {
@@ -23,18 +21,28 @@ export async function GET(
             FROM food_items 
             WHERE barcode_upc = ?
         `;
-        const [rows] = await connection.execute(sql, [upc]);
+        
+        // Explicitly type the result as RowDataPacket[]
+        const [rows] = await connection.execute<RowDataPacket[]>(sql, [upc]);
         await connection.end();
 
-        const foods = rows as any[];
-        if (foods.length === 0) {
+        if (rows.length === 0) {
             return NextResponse.json({ message: 'Food item not found for this barcode' }, { status: 404 });
         }
 
-        return NextResponse.json({ food: foods[0] }, { status: 200 });
+        return NextResponse.json({ food: rows[0] }, { status: 200 });
 
-    } catch (error: any) {
-        console.error('API Error:', error);
-        return NextResponse.json({ message: 'Server error while finding by barcode' }, { status: 500 });
+    } catch (error: unknown) {
+        // Safe error handling for unknown type
+        let errorMessage = 'Server error while finding by barcode';
+        
+        if (error instanceof Error) {
+            console.error('API Error:', error.message);
+            errorMessage = error.message;
+        } else {
+            console.error('API Error:', error);
+        }
+        
+        return NextResponse.json({ message: errorMessage }, { status: 500 });
     }
 }

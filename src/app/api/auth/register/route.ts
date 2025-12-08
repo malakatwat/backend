@@ -32,11 +32,18 @@ export async function POST(request: Request) {
 
         return NextResponse.json({ message: 'User registered successfully!' }, { status: 201 });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error('--- REGISTRATION ERROR ---:', error);
-        if (error.code === 'ER_DUP_ENTRY') {
-            return NextResponse.json({ message: 'Email already exists.' }, { status: 409 });
+        
+        // Type narrowing for error handling
+        if (error && typeof error === 'object' && 'code' in error) {
+            // Check for specific MySQL error codes if possible, though 'code' is not standard on Error
+            // Typically MySQL errors have a code property.
+            if ((error as { code: string }).code === 'ER_DUP_ENTRY') {
+                 return NextResponse.json({ message: 'Email already exists.' }, { status: 409 });
+            }
         }
+        
         return NextResponse.json({ message: 'Server error during registration.' }, { status: 500 });
     }
 }

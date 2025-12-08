@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { getConnection } from '@/lib/db';
 import { verifyAuth } from '@/lib/auth';
-import { RowDataPacket } from 'mysql2'; // 1. Import RowDataPacket
+import { RowDataPacket } from 'mysql2';
 
 // --- CRITICAL: Get your Gemini API Key ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
@@ -11,18 +11,20 @@ const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/
 async function getUserContext(userId: number) {
     const connection = await getConnection();
     
-    // 2. FIX: Explicitly type the query result
+    // Explicitly type the query result
     const [userRows] = await connection.execute<RowDataPacket[]>(
         `SELECT goal, age, current_weight, target_weight, gender, activity_level, height FROM users WHERE id = ?`,
         [userId]
     );
     await connection.end();
 
-    // 3. Safe access with fallback
+    // Safe access with fallback
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const userProfile = userRows.length > 0 ? userRows[0] : {} as any;
     
     // Simple logic for target calories
-    const targetCalories = userProfile?.goal === 'lose_weight' ? 1800 : 2500;
+    // defaulting to 2000 if goal is missing to be safe
+    const targetCalories = userProfile?.goal === 'lose_weight' ? 1800 : (userProfile?.goal === 'gain_weight' ? 2500 : 2000);
     
     return {
         profile: userProfile,

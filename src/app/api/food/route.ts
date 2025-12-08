@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { getConnection } from '@/lib/db';
+import { RowDataPacket } from 'mysql2'; // Import type
 
-// Define the interface for FoodItem here or import it if you have a shared types file
 export interface FoodItem {
   id: string;
   name: string;
@@ -13,7 +13,7 @@ export interface FoodItem {
   serving_unit?: string;
 }
 
-// Helper function to fetch from our local DB (client's custom foods)
+// Helper function to fetch from our local DB
 async function searchLocalDB(query: string): Promise<FoodItem[]> {
   try {
     const connection = await getConnection();
@@ -23,12 +23,13 @@ async function searchLocalDB(query: string): Promise<FoodItem[]> {
         WHERE name LIKE ? 
         LIMIT 20
     `;
-    // We add 'as any' to satisfy TypeScript's strictness with the SQL response
-    const [rows] = await connection.execute(sql, [`%${query}%`]);
+    
+    // FIX 1: Type the query result
+    const [rows] = await connection.execute<RowDataPacket[]>(sql, [`%${query}%`]);
     await connection.end();
     
-    // Map database rows to FoodItem structure (ensure IDs are strings)
-    return (rows as any[]).map((row) => ({
+    // FIX 2: Map correctly without 'any'
+    return rows.map((row) => ({
         id: row.id.toString(),
         name: row.name,
         calories: parseFloat(row.calories),
@@ -39,13 +40,13 @@ async function searchLocalDB(query: string): Promise<FoodItem[]> {
         serving_unit: row.serving_unit
     }));
 
-  } catch (error) {
+  } catch (error: unknown) { // FIX 3: Use unknown
     console.error("Error searching local DB:", error);
-    return []; // Don't fail the whole request if this part fails
+    return []; 
   }
 }
 
-// Helper function to fetch from the USDA API (the 2GB database)
+// Helper function to fetch from the USDA API
 async function searchUsdaAPI(query: string): Promise<FoodItem[]> {
   const apiKey = process.env.USDA_API_KEY;
   if (!apiKey) {
@@ -53,7 +54,6 @@ async function searchUsdaAPI(query: string): Promise<FoodItem[]> {
     return [];
   }
 
-  // We use 'dataType' to filter for common foods (Branded, Foundation, SR Legacy)
   const url = `https://api.nal.usda.gov/fdc/v1/foods/search?api_key=${apiKey}&query=${encodeURIComponent(query)}&pageSize=20&dataType=Branded,Foundation,SR%20Legacy`;
 
   try {
@@ -67,11 +67,14 @@ async function searchUsdaAPI(query: string): Promise<FoodItem[]> {
     
     if (!data.foods) return [];
 
-    // Map the complex USDA response to our simple FoodItem format
-    const formattedFoods: FoodItem[] = data.foods
-      .map((food: any) => {
+    // FIX 4: Use 'any' only where necessary for external API structure if it's complex, 
+    // but try to be specific or keep it scoped. Here 'any' is okay for the raw external data item 
+    // as long as we validate/map it safely.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const formattedFoods: FoodItem[] = (data.foods as any[])
+      .map((food) => {
         // Helper to find a specific nutrient by its ID
-        // 1008: Energy (kcal), 1003: Protein, 1004: Total Lipid (Fat), 1005: Carbohydrate
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const getNutrient = (id: number) => food.foodNutrients.find((n: any) => n.nutrientId === id || n.nutrientNumber === id.toString());
 
         const calories = getNutrient(1008)?.value || 0;
@@ -79,27 +82,26 @@ async function searchUsdaAPI(query: string): Promise<FoodItem[]> {
         const fat = getNutrient(1004)?.value || 0;
         const carbs = getNutrient(1005)?.value || 0;
         
-        // Only return foods that have at least a name and calories
         if (!food.description || (calories === 0 && protein === 0 && fat === 0 && carbs === 0)) {
           return null;
         }
         
         return {
-          id: `usda-${food.fdcId}`, // Add a prefix to distinguish USDA IDs from local IDs
+          id: `usda-${food.fdcId}`, 
           name: food.description,
           calories: calories,
           protein: protein,
           carbs: carbs,
           fat: fat,
-          serving_size: 100, // USDA data is standard per 100g/ml usually, or portion based
+          serving_size: 100, 
           serving_unit: 'g', 
         };
       })
-      .filter((food: FoodItem | null) => food !== null); // Filter out any null entries
+      .filter((food): food is FoodItem => food !== null); // Type predicate filter
 
     return formattedFoods;
 
-  } catch (error) {
+  } catch (error: unknown) { // FIX 5: Use unknown
     console.error("Error searching USDA API:", error);
     return [];
   }
@@ -111,24 +113,21 @@ export async function GET(request: NextRequest) {
         const { searchParams } = new URL(request.url);
         const query = searchParams.get('search') || '';
         
-        // If the query is empty, just return the custom foods (e.g., first 20)
         if (!query) {
             const localResults = await searchLocalDB('');
             return NextResponse.json({ foods: localResults }, { status: 200 });
         }
 
-        // 1. Run both searches at the same time (in parallel)
         const [localResults, usdaResults] = await Promise.all([
             searchLocalDB(query),
             searchUsdaAPI(query)
         ]);
 
-        // 2. Combine the results (local results appear first for priority)
         const combinedResults = [...localResults, ...usdaResults];
         
         return NextResponse.json({ foods: combinedResults }, { status: 200 });
 
-    } catch (error: any) {
+    } catch (error: unknown) { // FIX 6: Use unknown
         console.error('API Error:', error);
         return NextResponse.json({ message: 'Server error while searching for food' }, { status: 500 });
     }

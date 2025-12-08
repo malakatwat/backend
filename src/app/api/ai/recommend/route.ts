@@ -1,34 +1,46 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { verifyAuth } from '@/lib/auth';
 import { getConnection } from '@/lib/db';
-import { RowDataPacket } from 'mysql2'; // 1. Import RowDataPacket
+import { RowDataPacket } from 'mysql2';
 
+// --- CRITICAL: Get your Gemini API Key ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
 const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent";
+
+// Define an interface for the user profile data
+interface UserProfile {
+    goal: string;
+    age: number;
+    current_weight: number;
+    target_weight: number;
+    gender: string;
+    activity_level: string;
+    height: number;
+}
 
 // --- Helper to get user's full data ---
 async function getUserContext(userId: number) {
     const connection = await getConnection();
     
-    // 2. FIX: Explicitly type the result as RowDataPacket[]
+    // Explicitly type the result as RowDataPacket[]
     const [userRows] = await connection.execute<RowDataPacket[]>(
         `SELECT goal, age, current_weight, target_weight, gender, activity_level, height FROM users WHERE id = ?`,
         [userId]
     );
+    
+    // Cast the row to UserProfile if it exists, otherwise undefined
+    const userProfile = userRows.length > 0 ? (userRows[0] as unknown as UserProfile) : undefined;
 
-    // 3. Safe access: check if we got a row, otherwise use empty object BUT cast it to any to avoid TS errors
-    const userProfile = userRows.length > 0 ? userRows[0] : {} as any;
-
-    // Mock totals for prototype
+    // Mock totals for prototype context (In a real app, query diary_logs)
     const mockTotals = { calories: 800, protein: 50, carbs: 100, fat: 20 };
     
-    // Calculate targets based on profile
+    // Calculate targets based on profile, defaulting to 2500 if profile is missing
     const targetCalories = userProfile?.goal === 'lose_weight' ? 1800 : 2500;
     
     await connection.end();
 
     return {
-        profile: userProfile,
+        profile: userProfile || { goal: 'maintain', age: 25, gender: 'female', height: 165, current_weight: 60, activity_level: 'moderate' }, // Default fallback
         totals: mockTotals,
         remaining: {
             calories: targetCalories - mockTotals.calories,
@@ -48,7 +60,7 @@ export async function POST(request: NextRequest) {
         const { query, type } = await request.json(); 
         const context = await getUserContext(authUser.id);
 
-        // --- Construct the detailed system prompt ---
+        // --- Construct System Prompt ---
         let systemPrompt = `
             You are 'Dr. Sarah', a certified clinical dietitian specialized in Middle Eastern cuisine (Lebanese, Emirati, Bahraini).
             User Profile:
@@ -75,21 +87,15 @@ export async function POST(request: NextRequest) {
              systemPrompt += `
                 Create a fun, motivating 30-day fitness or nutrition challenge title and description for this user.
                 Focus on their goal of ${context.profile.goal}.
-                The output should be inspiring and sound like a community event.
             `;
         } else {
-            // Chat mode
-            systemPrompt += `
-                Answer the user's question concisely and supportively.
-                If they ask about their progress, use the provided stats.
-            `;
+            systemPrompt += `Answer concisely and supportively.`;
         }
 
-        // --- Make the Gemini API Call ---
+        // --- Call Gemini API ---
         const payload = {
             contents: [{ parts: [{ text: query }] }],
             systemInstruction: { parts: [{ text: systemPrompt }] },
-            // Optional: tools: [{ "google_search": {} }]
         };
 
         const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
@@ -104,7 +110,14 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ reply: aiResponseText }, { status: 200 });
 
     } catch (error: unknown) {
-        console.error('AI Error:', error);
-        return NextResponse.json({ message: 'Error processing AI request.' }, { status: 500 });
+        // Safe error handling
+        let errorMessage = 'Error processing AI request.';
+        if (error instanceof Error) {
+            errorMessage = error.message;
+            console.error('AI Error:', error.message);
+        } else {
+            console.error('AI Error:', error);
+        }
+        return NextResponse.json({ message: errorMessage }, { status: 500 });
     }
 }
