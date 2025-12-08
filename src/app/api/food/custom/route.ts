@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { getConnection } from '@/lib/db';
 import { verifyAuth } from '@/lib/auth';
+import { ResultSetHeader } from 'mysql2'; // 1. Import ResultSetHeader
 
 export async function POST(request: NextRequest) {
     try {
@@ -17,13 +18,14 @@ export async function POST(request: NextRequest) {
 
         const connection = await getConnection();
 
-        // Save the new custom food item to the database
         const sql = `
             INSERT INTO food_items (name, calories, protein, carbs, fat, serving_size, serving_unit)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         `;
-        // We use 0.00 for values the user might leave blank, ensuring database integrity
-        const [result] = await connection.execute(sql, [
+        
+        // 2. FIX: Explicitly type the result as ResultSetHeader
+        // This tells TypeScript that 'result' will have 'insertId'
+        const [result] = await connection.execute<ResultSetHeader>(sql, [
             name, 
             calories, 
             protein || 0.00, 
@@ -32,14 +34,15 @@ export async function POST(request: NextRequest) {
             serving_size || 1.00, 
             serving_unit
         ]);
+        
         await connection.end();
 
         return NextResponse.json({ 
             message: 'Custom food saved', 
-            foodId: result?.insertId 
+            foodId: result.insertId // Now TypeScript is happy!
         }, { status: 201 });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error('Custom Food API Error:', error);
         return NextResponse.json({ message: 'Server error while saving custom food.' }, { status: 500 });
     }
