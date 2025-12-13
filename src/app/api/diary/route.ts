@@ -126,7 +126,8 @@ export async function GET(request: NextRequest) {
       [user.id, date]
     );
 
-    connection?.release();
+   await connection.end();
+
     return NextResponse.json({ diary: rows }, { status: 200 });
 
   } catch (err) {
@@ -161,7 +162,8 @@ export async function POST(request: NextRequest) {
 
     const localFoodId = await ensureFoodExists(connection, food_id);
     if (!localFoodId) {
-      connection.release();
+     await connection.end();
+
       return NextResponse.json(
         { message: 'Invalid food item' },
         { status: 400 }
@@ -181,7 +183,7 @@ export async function POST(request: NextRequest) {
     );
 
     if (existing.length > 0) {
-      connection.release();
+     await connection.end();
       return NextResponse.json(
         { message: `This item is already in your ${meal_type} list.` },
         { status: 409 }
@@ -209,7 +211,8 @@ export async function POST(request: NextRequest) {
       [diaryLogId]
     );
 
-    connection.release();
+    await connection.end();
+
 
     return NextResponse.json(
       { message: 'Food logged successfully', log: newLog[0] },
