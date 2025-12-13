@@ -1,152 +1,230 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { getConnection } from '@/lib/db';
 import { verifyAuth } from '@/lib/auth';
-import { RowDataPacket } from 'mysql2';
+import type { RowDataPacket } from 'mysql2/promise';
 
-// --- CRITICAL: Get your Gemini API Key ---
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
-const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent";
+/* -------------------------------------------------------------------------- */
+/*                               Gemini Config                                */
+/* -------------------------------------------------------------------------- */
 
-// Helper to get user context for the AI
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_API_URL =
+  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
+
+/* -------------------------------------------------------------------------- */
+/*                         Helper: Fetch User Context                          */
+/* -------------------------------------------------------------------------- */
+
+interface UserProfile {
+  goal?: 'lose_weight' | 'gain_weight' | string;
+  age?: number;
+  current_weight?: number;
+  target_weight?: number;
+  gender?: string;
+  activity_level?: string;
+  height?: number;
+}
+
+
 async function getUserContext(userId: number) {
-    const connection = await getConnection();
-    
-    // Explicitly type the query result
-    const [userRows] = await connection.execute<RowDataPacket[]>(
-        `SELECT goal, age, current_weight, target_weight, gender, activity_level, height FROM users WHERE id = ?`,
-        [userId]
-    );
-    await connection.end();
+  const connection = await getConnection();
 
-    // Safe access with fallback
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const userProfile = userRows.length > 0 ? userRows[0] : {} as any;
-    
-    // Simple logic for target calories
-    // defaulting to 2000 if goal is missing to be safe
-    const targetCalories = userProfile?.goal === 'lose_weight' ? 1800 : (userProfile?.goal === 'gain_weight' ? 2500 : 2000);
-    
-    return {
-        profile: userProfile,
-        targetCalories: targetCalories,
-    };
+  const [rows] = await connection.execute<RowDataPacket[]>(
+    `
+      SELECT 
+        goal,
+        age,
+        current_weight,
+        target_weight,
+        gender,
+        activity_level,
+        height
+      FROM users
+      WHERE id = ?
+    `,
+    [userId]
+  );
+
+  await connection.end();
+
+  const profile: UserProfile =
+    rows.length > 0 ? (rows[0] as UserProfile) : {};
+
+  const targetCalories =
+    profile.goal === 'lose_weight'
+      ? 1800
+      : profile.goal === 'gain_weight'
+      ? 2500
+      : 2000;
+
+  return {
+    profile,
+    targetCalories,
+  };
 }
 
-// --- AI REPLY GENERATOR ---
+
+/* -------------------------------------------------------------------------- */
+/*                          Helper: AI Reply Generator                         */
+/* -------------------------------------------------------------------------- */
+
 async function getAiReply(userId: number, query: string): Promise<string> {
-    if (!GEMINI_API_KEY) {
-        return "I'm currently offline (API Key missing). Please try again later.";
-    }
+  if (!GEMINI_API_KEY) {
+    return 'I am currently offline. Please try again later.';
+  }
 
-    const context = await getUserContext(userId);
+  const context = await getUserContext(userId);
 
-    const systemPrompt = `
-        You are 'Dr. Sarah', a friendly, certified clinical dietitian.
-        User's Goal: ${context.profile.goal}.
-        User's Target: ${context.targetCalories} kcal.
-        
-        Respond to the user's message: "${query}"
-        
-        Guidelines:
-        1. If they say "Hi" or "Hello", greet them warmly and ask how their diet is going.
-        2. If they ask about food/recipes, give a short, healthy suggestion based on Middle Eastern cuisine.
-        3. If they ask about weight loss/gain, give 1 specific, actionable tip based on their goal.
-        4. Keep your answer under 3 sentences. Be encouraging.
-    `;
+  const systemPrompt = `
+You are "Dr. Sarah", a friendly certified clinical dietitian.
 
-    const payload = {
-        contents: [{ parts: [{ text: query }] }],
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-    };
+User Goal: ${context.profile.goal || 'not specified'}
+Daily Target: ${context.targetCalories} kcal
 
-    try {
-        const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
+Rules:
+- Keep replies under 3 sentences
+- Be friendly and encouraging
+- If greeting, greet back warmly
+- If food-related, suggest healthy Middle Eastern food
+- If weight-related, give 1 actionable tip
 
-        const result = await response.json();
-        return result.candidates?.[0]?.content?.parts?.[0]?.text || "I'm thinking... could you rephrase that?";
-    } catch (e) {
-        console.error("Gemini API call failed:", e);
-        return "I'm having a little trouble connecting right now. Please ask me again in a moment.";
-    }
-}
+User Message:
+"${query}"
+`;
 
-// --- GET: Fetch chat history ---
-export async function GET(request: NextRequest) {
+  const payload = {
+    contents: [{ parts: [{ text: query }] }],
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+  };
+
   try {
-    const user = verifyAuth(request);
-    if (!user || !user.id) return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
+    const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
 
-    const connection = await getConnection();
-    
-    // Get all messages for this user
-    const sql = `
-      SELECT * FROM messages 
-      WHERE (sender_id = ? AND receiver_id = 0) 
-         OR (sender_id = 0 AND receiver_id = ?)
-      ORDER BY created_at ASC
-    `;
-    
-    // Type the messages query result as well
-    const [rows] = await connection.execute<RowDataPacket[]>(sql, [user.id, user.id]);
-    let messages = rows;
+    const result = await response.json();
 
-    // If chat is empty, insert a welcome message
-    if (messages.length === 0) {
-        const welcomeMsg = "Hello! I'm Dr. Sarah, your AI dietitian. How can I help you today?";
-        await connection.execute(
-            `INSERT INTO messages (sender_id, receiver_id, message) VALUES (0, ?, ?)`,
-            [user.id, welcomeMsg]
-        );
-        // Fetch again to include the new message
-        const [newRows] = await connection.execute<RowDataPacket[]>(sql, [user.id, user.id]);
-        messages = newRows;
-    }
-
-    await connection.end();
-    return NextResponse.json({ messages: messages }, { status: 200 });
-
-  } catch (error: unknown) {
-    console.error('Chat API Error:', error);
-    return NextResponse.json({ message: 'Server error fetching messages' }, { status: 500 });
+    return (
+      result?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      'Could you please rephrase that?'
+    );
+  } catch (error) {
+    console.error('Gemini API Error:', error);
+    return 'I am having trouble responding right now. Please try again shortly.';
   }
 }
 
-// --- POST: Send a message and get AI reply ---
-export async function POST(request: NextRequest) {
+/* -------------------------------------------------------------------------- */
+/*                               GET: Chat History                             */
+/* -------------------------------------------------------------------------- */
+
+export async function GET(request: NextRequest) {
+  try {
     const user = verifyAuth(request);
-    if (!user || !user.id) return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
-
-    const { message } = await request.json();
-    if (!message) return NextResponse.json({ message: 'Message cannot be empty' }, { status: 400 });
-
-    try {
-        const connection = await getConnection();
-        
-        // 1. Save the User's message
-        await connection.execute(
-            `INSERT INTO messages (sender_id, receiver_id, message) VALUES (?, 0, ?)`, 
-            [user.id, message]
-        );
-        
-        // 2. Get the AI's Reply
-        const aiReply = await getAiReply(user.id, message);
-        
-        // 3. Save the AI's message
-        await connection.execute(
-            `INSERT INTO messages (sender_id, receiver_id, message) VALUES (0, ?, ?)`,
-            [user.id, aiReply]
-        );
-
-        await connection.end();
-
-        return NextResponse.json({ message: 'Sent', reply: aiReply }, { status: 200 });
-
-    } catch (error: unknown) {
-        console.error('Chat API Error:', error);
-        return NextResponse.json({ message: 'Server error sending message' }, { status: 500 });
+    if (!user?.id) {
+      return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
     }
+
+    const connection = await getConnection();
+
+    const sql = `
+      SELECT id, sender_id, receiver_id, message, created_at
+      FROM messages
+      WHERE 
+        (sender_id = ? AND receiver_id = 0)
+        OR
+        (sender_id = 0 AND receiver_id = ?)
+      ORDER BY created_at ASC
+    `;
+
+    const [rows] = await connection.execute<RowDataPacket[]>(sql, [
+      user.id,
+      user.id,
+    ]);
+
+    if (rows.length === 0) {
+      const welcomeMessage =
+        "Hello! I'm Dr. Sarah, your AI dietitian. How can I help you today?";
+
+      await connection.execute(
+        `INSERT INTO messages (sender_id, receiver_id, message)
+         VALUES (0, ?, ?)`,
+        [user.id, welcomeMessage]
+      );
+
+      const [newRows] = await connection.execute<RowDataPacket[]>(sql, [
+        user.id,
+        user.id,
+      ]);
+
+      await connection.end();
+      return NextResponse.json({ messages: newRows }, { status: 200 });
+    }
+
+    await connection.end();
+    return NextResponse.json({ messages: rows }, { status: 200 });
+  } catch (error) {
+    console.error('Chat GET Error:', error);
+    return NextResponse.json(
+      { message: 'Failed to fetch messages' },
+      { status: 500 }
+    );
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*                             POST: Send Message                              */
+/* -------------------------------------------------------------------------- */
+
+export async function POST(request: NextRequest) {
+  try {
+    const user = verifyAuth(request);
+    if (!user?.id) {
+      return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
+    }
+
+    const body = await request.json();
+    const message = body?.message?.trim();
+
+    if (!message) {
+      return NextResponse.json(
+        { message: 'Message cannot be empty' },
+        { status: 400 }
+      );
+    }
+
+    const connection = await getConnection();
+
+    // Save user message
+    await connection.execute(
+      `INSERT INTO messages (sender_id, receiver_id, message)
+       VALUES (?, 0, ?)`,
+      [user.id, message]
+    );
+
+    // Generate AI reply
+    const aiReply = await getAiReply(user.id, message);
+
+    // Save AI reply
+    await connection.execute(
+      `INSERT INTO messages (sender_id, receiver_id, message)
+       VALUES (0, ?, ?)`,
+      [user.id, aiReply]
+    );
+
+    await connection.end();
+
+    return NextResponse.json(
+      { message: 'Message sent', reply: aiReply },
+      { status: 200 }
+    );
+  } catch (error) {
+    console.error('Chat POST Error:', error);
+    return NextResponse.json(
+      { message: 'Failed to send message' },
+      { status: 500 }
+    );
+  }
 }
