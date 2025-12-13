@@ -148,11 +148,11 @@ export async function GET(request: NextRequest) {
       const welcomeMessage =
         "Hello! I'm Dr. Sarah, your AI dietitian. How can I help you today?";
 
-      await connection.execute(
-        `INSERT INTO messages (sender_id, receiver_id, message)
-         VALUES (0, ?, ?)`,
-        [user.id, welcomeMessage]
-      );
+await connection.execute(
+  `INSERT INTO messages (id, sender_id, receiver_id, message)
+   VALUES (?, ?, ?, ?)`,
+  [Date.now(), 0, user.id, welcomeMessage]
+)
 
       const [newRows] = await connection.execute<RowDataPacket[]>(sql, [
         user.id,
