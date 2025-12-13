@@ -1,11 +1,8 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { getConnection } from '@/lib/db';
 import { verifyAuth } from '@/lib/auth';
-import type {
-  PoolConnection,
-  RowDataPacket,
-  ResultSetHeader
-} from 'mysql2/promise';
+import type { Connection, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
+
 
 /* ----------------------------------
    Helper: Get USDA Food Details
@@ -43,7 +40,7 @@ async function getUsdaFoodDetails(fdcId: string) {
    Helper: Ensure Food Exists
 ----------------------------------- */
 async function ensureFoodExists(
-  connection: PoolConnection,
+  connection: Connection,
   foodId: string | number
 ): Promise<number | null> {
 
