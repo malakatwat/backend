@@ -19,31 +19,22 @@ interface UserProfile {
   goal?: 'lose_weight' | 'gain_weight' | string;
   age?: number;
   current_weight?: number;
-  target_weight?: number;
   gender?: 'male' | 'female';
   activity_level?: 'sedentary' | 'light' | 'moderate' | 'active';
   height?: number;
 }
 
 /* -------------------------------------------------------------------------- */
-/*                        Calorie Calculation (Dietitian)                      */
+/*                        Calorie Calculation (Real Dietitian)                 */
 /* -------------------------------------------------------------------------- */
 
 function calculateCalories(profile: UserProfile): number | null {
-  const {
-    age,
-    height,
-    current_weight,
-    gender,
-    activity_level,
-    goal,
-  } = profile;
+  const { age, height, current_weight, gender, activity_level, goal } = profile;
 
   if (!age || !height || !current_weight || !gender || !activity_level) {
     return null;
   }
 
-  // Mifflin-St Jeor Equation
   const bmr =
     gender === 'male'
       ? 10 * current_weight + 6.25 * height - 5 * age + 5
@@ -73,7 +64,7 @@ async function getUserContext(userId: number) {
 
   const [rows] = await connection.execute<RowDataPacket[]>(
     `
-    SELECT goal, age, current_weight, target_weight, gender, activity_level, height
+    SELECT goal, age, current_weight, gender, activity_level, height
     FROM users
     WHERE id = ?
     `,
@@ -98,9 +89,9 @@ function detectIntent(query: string) {
   if (q.match(/hi|hello|hey/)) return 'greeting';
   if (q.match(/lose|fat|slim|weight loss/)) return 'weight_loss';
   if (q.match(/gain|bulk|muscle|weight gain/)) return 'weight_gain';
-  if (q.match(/diabetes|thyroid|pcod|bp|cholesterol|acidity|pain/))
+  if (q.match(/thyroid|diabetes|pcod|bp|cholesterol|acidity|pain|bloating/))
     return 'medical';
-  if (q.match(/calorie|protein|diet|food|meal/)) return 'nutrition';
+  if (q.match(/diet|food|meal|protein|calorie/)) return 'nutrition';
 
   return 'general';
 }
@@ -111,45 +102,52 @@ function detectIntent(query: string) {
 
 async function getAiReply(userId: number, query: string): Promise<string> {
   if (!GEMINI_API_KEY) {
-    return 'I am temporarily unavailable. Please try again shortly.';
+    return 'I am unavailable right now. Please try again.';
   }
 
   const { profile, calories } = await getUserContext(userId);
   const intent = detectIntent(query);
 
-  // Goal vs Intent Conflict Handling
-  if (
-    profile.goal === 'gain_weight' &&
-    intent === 'weight_loss'
-  ) {
-    return `I notice your profile goal is weight gain, but you’re asking about weight loss. Can you clarify what you want to focus on right now so I can guide you correctly?`;
+  /* ---------------------------------------------------------------------- */
+  /* Smart goal handling (NO LOOP, NO BLOCKING)                              */
+  /* ---------------------------------------------------------------------- */
+
+  let effectiveGoal = profile.goal;
+
+  if (intent === 'weight_loss') effectiveGoal = 'lose_weight';
+  if (intent === 'weight_gain') effectiveGoal = 'gain_weight';
+
+  /* ---------------------------------------------------------------------- */
+  /* Short Human Greeting                                                    */
+  /* ---------------------------------------------------------------------- */
+
+  if (intent === 'greeting') {
+    return 'Hi, how can I help you today?';
   }
 
-  if (
-    profile.goal === 'lose_weight' &&
-    intent === 'weight_gain'
-  ) {
-    return `Your profile mentions weight loss, but this question sounds like weight gain. Let me know which goal you want to work on currently.`;
-  }
+  /* ---------------------------------------------------------------------- */
+  /* Gemini Prompt (Human, Plain Text Only)                                  */
+  /* ---------------------------------------------------------------------- */
 
   const systemPrompt = `
-You are Dr. Sarah, a warm and experienced clinical dietitian.
+You are Dr. Sarah, an experienced clinical dietitian.
 
-User Profile:
-- Goal: ${profile.goal || 'not specified'}
-- Age: ${profile.age || 'unknown'}
-- Height: ${profile.height || 'unknown'} cm
-- Weight: ${profile.current_weight || 'unknown'} kg
-- Activity Level: ${profile.activity_level || 'unknown'}
-- Estimated Calories: ${calories || 'not calculated'}
+User details:
+Goal in profile: ${profile.goal || 'not set'}
+Current focus: ${effectiveGoal || 'not specified'}
+Age: ${profile.age || 'unknown'}
+Height: ${profile.height || 'unknown'} cm
+Weight: ${profile.current_weight || 'unknown'} kg
+Activity level: ${profile.activity_level || 'unknown'}
+Estimated calories: ${calories || 'not calculated'}
 
-Guidelines:
-- Respond naturally like a human dietitian
-- Show empathy before advice
-- Ask clarifying questions if needed
-- Avoid strict prescriptions for medical conditions
-- Give culturally flexible food examples
-- Safety first, motivation second
+Rules:
+Speak like a real dietitian chatting on WhatsApp.
+Keep replies natural and supportive.
+No stars, no emojis, no markdown, no bullet points.
+No long lectures.
+Health questions are always allowed.
+If medical condition is mentioned, be cautious and practical.
 `;
 
   const payload = {
@@ -168,16 +166,16 @@ Guidelines:
 
     return (
       result?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      'Could you please explain that a bit more?'
+      'Can you tell me a bit more about this?'
     );
   } catch (error) {
     console.error('Gemini API Error:', error);
-    return 'I’m having trouble responding right now. Please try again in a moment.';
+    return 'Something went wrong. Please try again.';
   }
 }
 
 /* -------------------------------------------------------------------------- */
-/*                               GET: History                                  */
+/*                               GET: Chat History                             */
 /* -------------------------------------------------------------------------- */
 
 export async function GET(request: NextRequest) {
@@ -201,8 +199,7 @@ export async function GET(request: NextRequest) {
     );
 
     if (!rows.length) {
-      const welcome =
-        "Hello, I’m Dr. Sarah, your dietitian. Tell me about your food habits or health goals.";
+      const welcome = 'Hi, how can I help you today?';
 
       await connection.execute(
         `INSERT INTO messages (sender_id, receiver_id, message)
@@ -237,7 +234,7 @@ export async function GET(request: NextRequest) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                               POST: Message                                 */
+/*                               POST: Send Message                            */
 /* -------------------------------------------------------------------------- */
 
 export async function POST(request: NextRequest) {
@@ -247,8 +244,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
     }
 
-    const { message } = await request.json();
-    if (!message?.trim()) {
+    const body = await request.json();
+    const message = body?.message?.trim();
+
+    if (!message) {
       return NextResponse.json(
         { message: 'Message cannot be empty' },
         { status: 400 }
