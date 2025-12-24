@@ -36,6 +36,8 @@ function sanitizeAiText(text: string): string {
     .replace(/^\d+\.\s*/gm, '')
     .replace(/^[-•]\s*/gm, '')
     .replace(/[⭐★]/g, '')
+    .replace(/Can you tell me more.*$/i, '')
+    .replace(/Tell me a bit more.*$/i, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -85,7 +87,7 @@ function calculateCalories(profile: UserProfile): number | null {
 }
 
 /* -------------------------------------------------------------------------- */
-/* DB Helpers                                                                  */
+/* DB Context                                                                  */
 /* -------------------------------------------------------------------------- */
 
 async function getUserContext(userId: number) {
@@ -108,39 +110,6 @@ async function getUserContext(userId: number) {
   return { profile, calories };
 }
 
-async function resolveEffectiveGoal(
-  userId: number,
-  profileGoal?: string,
-  query?: string
-) {
-  const q = query?.toLowerCase() || '';
-
-  if (/weight loss|lose weight/.test(q)) return 'lose_weight';
-  if (/weight gain|gain weight/.test(q)) return 'gain_weight';
-
-  const connection = await getConnection();
-  const [rows] = await connection.execute<RowDataPacket[]>(
-    `
-    SELECT message
-    FROM messages
-    WHERE sender_id = ?
-      AND message IN ('weight loss', 'weight gain')
-    ORDER BY created_at DESC
-    LIMIT 1
-    `,
-    [userId]
-  );
-  await connection.end();
-
-  if (rows.length) {
-    return rows[0].message === 'weight loss'
-      ? 'lose_weight'
-      : 'gain_weight';
-  }
-
-  return profileGoal;
-}
-
 /* -------------------------------------------------------------------------- */
 /* AI Reply                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -152,34 +121,30 @@ async function getAiReply(userId: number, query: string): Promise<string> {
 
   const { profile, calories } = await getUserContext(userId);
   const intent = detectIntent(query);
-  const effectiveGoal = await resolveEffectiveGoal(
-    userId,
-    profile.goal,
-    query
-  );
 
   if (intent === 'greeting') {
     return 'Hi, how can I help you today?';
   }
 
   const systemPrompt = `
-You are Dr. Sarah, a real clinical dietitian chatting naturally.
+You are Dr. Sarah, a real clinical dietitian chatting naturally on WhatsApp.
 
 User context:
-Goal: ${effectiveGoal || 'not specified'}
+Goal: ${profile.goal || 'not specified'}
 Age: ${profile.age || 'unknown'}
 Height: ${profile.height || 'unknown'} cm
 Weight: ${profile.current_weight || 'unknown'} kg
 Activity level: ${profile.activity_level || 'unknown'}
-Calories: ${calories || 'not calculated'}
+Calories: ${calories || 'estimate not available'}
 
-Rules:
-Never repeat questions already answered.
-Never ask again about goal unless user changes it.
-Health questions are always allowed.
-Plain text only.
-No markdown, no bullets, no emojis.
-Short, human, practical replies.
+MANDATORY RULES:
+1. Always give advice first.
+2. Never ask more than 1 or 2 short questions.
+3. Never say "tell me more" or similar.
+4. Never repeat questions about goal.
+5. If information is missing, assume reasonable defaults and still guide.
+6. Plain text only. No bullets, no stars, no formatting.
+7. Friendly, calm, human tone.
 `;
 
   const payload = {
@@ -197,7 +162,7 @@ Short, human, practical replies.
     const result = await response.json();
     const raw =
       result?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      'Can you explain a bit more?';
+      'Based on what you shared, a balanced diet with enough protein, vegetables, and regular meals will help.';
 
     return sanitizeAiText(raw);
   } catch {
@@ -230,15 +195,11 @@ export async function GET(request: NextRequest) {
 
   if (!rows.length) {
     const welcome = 'Hi, how can I help you today?';
-
     await connection.execute(
       `INSERT INTO messages (sender_id, receiver_id, message)
        VALUES (0, ?, ?)`,
       [user.id, welcome]
     );
-
-    await connection.end();
-    return NextResponse.json({ messages: [] });
   }
 
   await connection.end();
