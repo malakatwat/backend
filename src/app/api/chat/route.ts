@@ -4,7 +4,7 @@ import { verifyAuth } from '@/lib/auth';
 import type { RowDataPacket } from 'mysql2/promise';
 
 /* -------------------------------------------------------------------------- */
-/* Gemini Config                                                               */
+/*                               Gemini Config                                 */
 /* -------------------------------------------------------------------------- */
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
@@ -12,51 +12,20 @@ const GEMINI_API_URL =
   'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 
 /* -------------------------------------------------------------------------- */
-/* Types                                                                       */
+/*                              User Profile Type                              */
 /* -------------------------------------------------------------------------- */
 
 interface UserProfile {
-  goal?: 'lose_weight' | 'gain_weight';
+  goal?: 'lose_weight' | 'gain_weight' | string;
   age?: number;
   current_weight?: number;
-  height?: number;
   gender?: 'male' | 'female';
   activity_level?: 'sedentary' | 'light' | 'moderate' | 'active';
+  height?: number;
 }
 
 /* -------------------------------------------------------------------------- */
-/* Utils                                                                       */
-/* -------------------------------------------------------------------------- */
-
-function sanitizeAiText(text: string): string {
-  return text
-    .replace(/^#{1,6}\s*/gm, '')
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/\*(.*?)\*/g, '$1')
-    .replace(/^\d+\.\s*/gm, '')
-    .replace(/^[-•]\s*/gm, '')
-    .replace(/[⭐★]/g, '')
-    .replace(/Can you tell me more.*$/i, '')
-    .replace(/Tell me a bit more.*$/i, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-function detectIntent(query: string) {
-  const q = query.toLowerCase();
-
-  if (/^(hi|hello|hey)$/.test(q)) return 'greeting';
-  if (/lose|fat|slim|weight loss/.test(q)) return 'weight_loss';
-  if (/gain|bulk|muscle|weight gain/.test(q)) return 'weight_gain';
-  if (/thyroid|diabetes|pcod|bp|cholesterol|pain|acidity|bloating/.test(q))
-    return 'medical';
-  if (/diet|food|meal|protein|calorie/.test(q)) return 'nutrition';
-
-  return 'general';
-}
-
-/* -------------------------------------------------------------------------- */
-/* Calories                                                                    */
+/*                        Calorie Calculation (Real Dietitian)                 */
 /* -------------------------------------------------------------------------- */
 
 function calculateCalories(profile: UserProfile): number | null {
@@ -71,14 +40,14 @@ function calculateCalories(profile: UserProfile): number | null {
       ? 10 * current_weight + 6.25 * height - 5 * age + 5
       : 10 * current_weight + 6.25 * height - 5 * age - 161;
 
-  const activityMap = {
+  const activityMultiplier: Record<string, number> = {
     sedentary: 1.2,
     light: 1.375,
     moderate: 1.55,
     active: 1.725,
   };
 
-  let calories = bmr * activityMap[activity_level];
+  let calories = bmr * (activityMultiplier[activity_level] || 1.2);
 
   if (goal === 'lose_weight') calories -= 400;
   if (goal === 'gain_weight') calories += 400;
@@ -87,7 +56,7 @@ function calculateCalories(profile: UserProfile): number | null {
 }
 
 /* -------------------------------------------------------------------------- */
-/* DB Context                                                                  */
+/*                           User Context Fetcher                              */
 /* -------------------------------------------------------------------------- */
 
 async function getUserContext(userId: number) {
@@ -95,7 +64,7 @@ async function getUserContext(userId: number) {
 
   const [rows] = await connection.execute<RowDataPacket[]>(
     `
-    SELECT goal, age, current_weight, height, gender, activity_level
+    SELECT goal, age, current_weight, gender, activity_level, height
     FROM users
     WHERE id = ?
     `,
@@ -111,7 +80,24 @@ async function getUserContext(userId: number) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* AI Reply                                                                    */
+/*                           Intent Detection                                  */
+/* -------------------------------------------------------------------------- */
+
+function detectIntent(query: string) {
+  const q = query.toLowerCase();
+
+  if (q.match(/hi|hello|hey/)) return 'greeting';
+  if (q.match(/lose|fat|slim|weight loss/)) return 'weight_loss';
+  if (q.match(/gain|bulk|muscle|weight gain/)) return 'weight_gain';
+  if (q.match(/thyroid|diabetes|pcod|bp|cholesterol|acidity|pain|bloating/))
+    return 'medical';
+  if (q.match(/diet|food|meal|protein|calorie/)) return 'nutrition';
+
+  return 'general';
+}
+
+/* -------------------------------------------------------------------------- */
+/*                           AI Reply Generator                                */
 /* -------------------------------------------------------------------------- */
 
 async function getAiReply(userId: number, query: string): Promise<string> {
@@ -122,29 +108,46 @@ async function getAiReply(userId: number, query: string): Promise<string> {
   const { profile, calories } = await getUserContext(userId);
   const intent = detectIntent(query);
 
+  /* ---------------------------------------------------------------------- */
+  /* Smart goal handling (NO LOOP, NO BLOCKING)                              */
+  /* ---------------------------------------------------------------------- */
+
+  let effectiveGoal = profile.goal;
+
+  if (intent === 'weight_loss') effectiveGoal = 'lose_weight';
+  if (intent === 'weight_gain') effectiveGoal = 'gain_weight';
+
+  /* ---------------------------------------------------------------------- */
+  /* Short Human Greeting                                                    */
+  /* ---------------------------------------------------------------------- */
+
   if (intent === 'greeting') {
     return 'Hi, how can I help you today?';
   }
 
-  const systemPrompt = `
-You are Dr. Sarah, a real clinical dietitian chatting naturally on WhatsApp.
+  /* ---------------------------------------------------------------------- */
+  /* Gemini Prompt (Human, Plain Text Only)                                  */
+  /* ---------------------------------------------------------------------- */
 
-User context:
-Goal: ${profile.goal || 'not specified'}
+  const systemPrompt = `
+You are Dr. Sarah, an experienced clinical dietitian.
+
+User details:
+Goal in profile: ${profile.goal || 'not set'}
+Current focus: ${effectiveGoal || 'not specified'}
 Age: ${profile.age || 'unknown'}
 Height: ${profile.height || 'unknown'} cm
 Weight: ${profile.current_weight || 'unknown'} kg
 Activity level: ${profile.activity_level || 'unknown'}
-Calories: ${calories || 'estimate not available'}
+Estimated calories: ${calories || 'not calculated'}
 
-MANDATORY RULES:
-1. Always give advice first.
-2. Never ask more than 1 or 2 short questions.
-3. Never say "tell me more" or similar.
-4. Never repeat questions about goal.
-5. If information is missing, assume reasonable defaults and still guide.
-6. Plain text only. No bullets, no stars, no formatting.
-7. Friendly, calm, human tone.
+Rules:
+Speak like a real dietitian chatting on WhatsApp.
+Keep replies natural and supportive.
+No stars, no emojis, no markdown, no bullet points.
+No long lectures.
+Health questions are always allowed.
+If medical condition is mentioned, be cautious and practical.
 `;
 
   const payload = {
@@ -160,89 +163,121 @@ MANDATORY RULES:
     });
 
     const result = await response.json();
-    const raw =
-      result?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      'Based on what you shared, a balanced diet with enough protein, vegetables, and regular meals will help.';
 
-    return sanitizeAiText(raw);
-  } catch {
+    return (
+      result?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      'Can you tell me a bit more about this?'
+    );
+  } catch (error) {
+    console.error('Gemini API Error:', error);
     return 'Something went wrong. Please try again.';
   }
 }
 
 /* -------------------------------------------------------------------------- */
-/* GET Chat                                                                    */
+/*                               GET: Chat History                             */
 /* -------------------------------------------------------------------------- */
 
 export async function GET(request: NextRequest) {
-  const user = verifyAuth(request);
-  if (!user?.id) {
-    return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
-  }
+  try {
+    const user = verifyAuth(request);
+    if (!user?.id) {
+      return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
+    }
 
-  const connection = await getConnection();
+    const connection = await getConnection();
 
-  const [rows] = await connection.execute<RowDataPacket[]>(
-    `
-    SELECT id, sender_id, receiver_id, message, created_at
-    FROM messages
-    WHERE (sender_id = ? AND receiver_id = 0)
-       OR (sender_id = 0 AND receiver_id = ?)
-    ORDER BY created_at ASC
-    `,
-    [user.id, user.id]
-  );
+    const [rows] = await connection.execute<RowDataPacket[]>(
+      `
+      SELECT id, sender_id, receiver_id, message, created_at
+      FROM messages
+      WHERE (sender_id = ? AND receiver_id = 0)
+         OR (sender_id = 0 AND receiver_id = ?)
+      ORDER BY created_at ASC
+      `,
+      [user.id, user.id]
+    );
 
-  if (!rows.length) {
-    const welcome = 'Hi, how can I help you today?';
-    await connection.execute(
-      `INSERT INTO messages (sender_id, receiver_id, message)
-       VALUES (0, ?, ?)`,
-      [user.id, welcome]
+    if (!rows.length) {
+      const welcome = 'Hi, how can I help you today?';
+
+      await connection.execute(
+        `INSERT INTO messages (sender_id, receiver_id, message)
+         VALUES (0, ?, ?)`,
+        [user.id, welcome]
+      );
+
+      const [newRows] = await connection.execute<RowDataPacket[]>(
+        `
+        SELECT id, sender_id, receiver_id, message, created_at
+        FROM messages
+        WHERE (sender_id = ? AND receiver_id = 0)
+           OR (sender_id = 0 AND receiver_id = ?)
+        ORDER BY created_at ASC
+        `,
+        [user.id, user.id]
+      );
+
+      await connection.end();
+      return NextResponse.json({ messages: newRows });
+    }
+
+    await connection.end();
+    return NextResponse.json({ messages: rows });
+  } catch (error) {
+    console.error('Chat GET Error:', error);
+    return NextResponse.json(
+      { message: 'Failed to fetch messages' },
+      { status: 500 }
     );
   }
-
-  await connection.end();
-  return NextResponse.json({ messages: rows });
 }
 
 /* -------------------------------------------------------------------------- */
-/* POST Chat                                                                   */
+/*                               POST: Send Message                            */
 /* -------------------------------------------------------------------------- */
 
 export async function POST(request: NextRequest) {
-  const user = verifyAuth(request);
-  if (!user?.id) {
-    return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
-  }
+  try {
+    const user = verifyAuth(request);
+    if (!user?.id) {
+      return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
+    }
 
-  const body = await request.json();
-  const message = body?.message?.trim();
+    const body = await request.json();
+    const message = body?.message?.trim();
 
-  if (!message) {
+    if (!message) {
+      return NextResponse.json(
+        { message: 'Message cannot be empty' },
+        { status: 400 }
+      );
+    }
+
+    const connection = await getConnection();
+
+    await connection.execute(
+      `INSERT INTO messages (sender_id, receiver_id, message)
+       VALUES (?, 0, ?)`,
+      [user.id, message]
+    );
+
+    const aiReply = await getAiReply(user.id, message);
+
+    await connection.execute(
+      `INSERT INTO messages (sender_id, receiver_id, message)
+       VALUES (0, ?, ?)`,
+      [user.id, aiReply]
+    );
+
+    await connection.end();
+
+    return NextResponse.json({ reply: aiReply });
+  } catch (error) {
+    console.error('Chat POST Error:', error);
     return NextResponse.json(
-      { message: 'Message cannot be empty' },
-      { status: 400 }
+      { message: 'Failed to send message' },
+      { status: 500 }
     );
   }
-
-  const connection = await getConnection();
-
-  await connection.execute(
-    `INSERT INTO messages (sender_id, receiver_id, message)
-     VALUES (?, 0, ?)`,
-    [user.id, message]
-  );
-
-  const aiReply = await getAiReply(user.id, message);
-
-  await connection.execute(
-    `INSERT INTO messages (sender_id, receiver_id, message)
-     VALUES (0, ?, ?)`,
-    [user.id, aiReply]
-  );
-
-  await connection.end();
-
-  return NextResponse.json({ reply: aiReply });
 }
