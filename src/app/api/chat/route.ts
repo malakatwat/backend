@@ -25,6 +25,35 @@ interface UserProfile {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Utils                                                                       */
+/* -------------------------------------------------------------------------- */
+
+function sanitize(text: string): string {
+  return text
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/^\d+\.\s*/gm, '')
+    .replace(/^[-•]\s*/gm, '')
+    .replace(/[⭐★]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function detectIntent(query: string) {
+  const q = query.toLowerCase();
+
+  if (/^(hi|hello|hey)$/.test(q)) return 'greeting';
+  if (/meal plan|full day|eat plan/.test(q)) return 'meal_plan';
+  if (/fruit|portion|serve|quantity/.test(q)) return 'portion';
+  if (/lose|weight loss|fat/.test(q)) return 'lose';
+  if (/gain|weight gain|bulk/.test(q)) return 'gain';
+  if (/thyroid|diabetes|pcod|bp|cholesterol/.test(q)) return 'medical';
+
+  return 'general';
+}
+
+/* -------------------------------------------------------------------------- */
 /* Calories                                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -80,34 +109,23 @@ async function getUserContext(userId: number) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Intent Detection                                                            */
+/* Hard Answers (NO AI FAILURE)                                                */
 /* -------------------------------------------------------------------------- */
 
-function detectIntent(query: string) {
-  const q = query.toLowerCase();
+function forcedAnswer(intent: string, profile: UserProfile) {
+  if (intent === 'portion') {
+    return `For weight loss, aim for 2 servings of fruit per day. One serving is one medium apple, orange, or one cup of cut fruit. For meals, use this plate method: half vegetables, one quarter protein, and one quarter whole grains. This keeps calories controlled without feeling hungry.`;
+  }
 
-  if (/^(hi|hello|hey)$/.test(q)) return 'greeting';
-  if (/meal plan|diet plan|full day|what should i eat/.test(q)) return 'diet';
-  if (/lose|weight loss|fat/.test(q)) return 'lose';
-  if (/gain|weight gain|bulk/.test(q)) return 'gain';
-  if (/thyroid|diabetes|pcod|bp|cholesterol/.test(q)) return 'medical';
+  if (intent === 'meal_plan') {
+    return `Here is a simple full day meal plan for weight loss. Breakfast: oats or eggs with vegetables. Lunch: roti or rice with dal or chicken and salad. Snack: fruit or yogurt. Dinner: light meal with vegetables and protein. Keep oil and sugar minimal.`;
+  }
 
-  return 'general';
-}
+  if (intent === 'lose') {
+    return `For weight loss, focus on regular meals, high protein, plenty of vegetables, and controlled portions. Avoid sugary drinks and late-night snacking.`;
+  }
 
-/* -------------------------------------------------------------------------- */
-/* Sanitizer                                                                   */
-/* -------------------------------------------------------------------------- */
-
-function sanitize(text: string): string {
-  return text
-    .replace(/^#{1,6}\s*/gm, '')
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/\*(.*?)\*/g, '$1')
-    .replace(/^\d+\.\s*/gm, '')
-    .replace(/^[-•]\s*/gm, '')
-    .replace(/[⭐★]/g, '')
-    .trim();
+  return `For your health goals, focus on balanced meals, regular timing, and hydration.`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -122,10 +140,14 @@ async function getAiReply(userId: number, query: string): Promise<string> {
     return 'Hi, how can I help you today?';
   }
 
-  const systemPrompt = `
-You are Dr. Sarah, a real clinical dietitian chatting naturally.
+  if (!GEMINI_API_KEY) {
+    return forcedAnswer(intent, profile);
+  }
 
-User profile (use silently):
+  const systemPrompt = `
+You are Dr. Sarah, a real dietitian chatting like WhatsApp.
+
+User profile:
 Age: ${profile.age || 'unknown'}
 Height: ${profile.height || 'unknown'} cm
 Weight: ${profile.current_weight || 'unknown'} kg
@@ -134,40 +156,33 @@ Calories: ${calories || 'not calculated'}
 
 Rules:
 Answer immediately.
-Give practical advice first.
-Never ask more than one question.
-Never say "tell me more".
-No markdown, bullets, emojis, or symbols.
-Plain human text.
+Give advice first.
+Ask max one question at the end only if needed.
+No markdown, no bullets, no emojis.
+Plain human language.
 `;
-
-  const payload = {
-    contents: [{ parts: [{ text: query }] }],
-    systemInstruction: { parts: [{ text: systemPrompt }] },
-  };
 
   try {
     const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: query }] }],
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+      }),
     });
 
     const result = await response.json();
     const raw = result?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    if (raw) {
+    if (raw && raw.length > 20) {
       return sanitize(raw);
     }
 
-    // LAST RESORT (specific, not generic)
-    if (intent === 'diet' || intent === 'lose') {
-      return `For weight loss, start your day with protein and fiber, keep lunch balanced with vegetables and lean protein, and eat a light dinner. Avoid sugar, fried food, and late-night snacking.`;
-    }
-
-    return `I can help with diet, weight goals, or health concerns.`;
+    // FORCE RESPONSE IF AI IS WEAK
+    return forcedAnswer(intent, profile);
   } catch {
-    return `For your health goals, focus on regular meals, adequate protein, and hydration. Let me know if you want a meal plan or guidance for a specific condition.`;
+    return forcedAnswer(intent, profile);
   }
 }
 
