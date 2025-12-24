@@ -4,7 +4,7 @@ import { verifyAuth } from '@/lib/auth';
 import type { RowDataPacket } from 'mysql2/promise';
 
 /* -------------------------------------------------------------------------- */
-/*                               Gemini Config                                 */
+/* Gemini Config                                                               */
 /* -------------------------------------------------------------------------- */
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
@@ -12,7 +12,7 @@ const GEMINI_API_URL =
   'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 
 /* -------------------------------------------------------------------------- */
-/*                              User Profile Type                              */
+/* Types                                                                       */
 /* -------------------------------------------------------------------------- */
 
 interface UserProfile {
@@ -25,7 +25,7 @@ interface UserProfile {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                        Calorie Calculation                                  */
+/* Calories                                                                    */
 /* -------------------------------------------------------------------------- */
 
 function calculateCalories(profile: UserProfile): number | null {
@@ -40,14 +40,14 @@ function calculateCalories(profile: UserProfile): number | null {
       ? 10 * current_weight + 6.25 * height - 5 * age + 5
       : 10 * current_weight + 6.25 * height - 5 * age - 161;
 
-  const activityMultiplier: Record<string, number> = {
+  const activityMap = {
     sedentary: 1.2,
     light: 1.375,
     moderate: 1.55,
     active: 1.725,
   };
 
-  let calories = bmr * activityMultiplier[activity_level];
+  let calories = bmr * activityMap[activity_level];
 
   if (goal === 'lose_weight') calories -= 400;
   if (goal === 'gain_weight') calories += 400;
@@ -56,7 +56,7 @@ function calculateCalories(profile: UserProfile): number | null {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                           Fetch User Context                                */
+/* User Context                                                                */
 /* -------------------------------------------------------------------------- */
 
 async function getUserContext(userId: number) {
@@ -80,25 +80,23 @@ async function getUserContext(userId: number) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                           Intent Detection                                  */
+/* Intent Detection                                                            */
 /* -------------------------------------------------------------------------- */
 
 function detectIntent(query: string) {
   const q = query.toLowerCase();
 
   if (/^(hi|hello|hey)$/.test(q)) return 'greeting';
-  if (/lose|fat|slim|weight loss/.test(q)) return 'weight_loss';
-  if (/gain|bulk|muscle|weight gain/.test(q)) return 'weight_gain';
-  if (/meal plan|diet plan|full day|what should i eat/.test(q))
-    return 'direct_diet';
-  if (/thyroid|diabetes|pcod|bp|cholesterol|acidity|pain|bloating/.test(q))
-    return 'medical';
+  if (/meal plan|diet plan|full day|what should i eat/.test(q)) return 'diet';
+  if (/lose|weight loss|fat/.test(q)) return 'lose';
+  if (/gain|weight gain|bulk/.test(q)) return 'gain';
+  if (/thyroid|diabetes|pcod|bp|cholesterol/.test(q)) return 'medical';
 
   return 'general';
 }
 
 /* -------------------------------------------------------------------------- */
-/*                           Text Sanitizer                                    */
+/* Sanitizer                                                                   */
 /* -------------------------------------------------------------------------- */
 
 function sanitize(text: string): string {
@@ -109,33 +107,14 @@ function sanitize(text: string): string {
     .replace(/^\d+\.\s*/gm, '')
     .replace(/^[-•]\s*/gm, '')
     .replace(/[⭐★]/g, '')
-    .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
 /* -------------------------------------------------------------------------- */
-/*                           Human Fallback                                    */
-/* -------------------------------------------------------------------------- */
-
-function humanFallback(profile: UserProfile, intent: string): string {
-  if (intent === 'direct_diet' || profile.goal === 'lose_weight') {
-    return `For weight loss, focus on balanced meals with good protein, vegetables, and controlled portions of carbs. 
-Breakfast can include oats or eggs, lunch should be a protein-rich meal with vegetables, and dinner should be light. 
-Avoid sugary snacks and drink enough water.`;
-  }
-
-  return `I can help with diet, weight goals, or health concerns. Tell me what you want to focus on right now.`;
-}
-
-/* -------------------------------------------------------------------------- */
-/*                           AI Reply Generator                                */
+/* AI Reply                                                                    */
 /* -------------------------------------------------------------------------- */
 
 async function getAiReply(userId: number, query: string): Promise<string> {
-  if (!GEMINI_API_KEY) {
-    return 'Service is temporarily unavailable.';
-  }
-
   const { profile, calories } = await getUserContext(userId);
   const intent = detectIntent(query);
 
@@ -144,7 +123,7 @@ async function getAiReply(userId: number, query: string): Promise<string> {
   }
 
   const systemPrompt = `
-You are Dr. Sarah, a real clinical dietitian chatting naturally on WhatsApp.
+You are Dr. Sarah, a real clinical dietitian chatting naturally.
 
 User profile (use silently):
 Age: ${profile.age || 'unknown'}
@@ -153,15 +132,13 @@ Weight: ${profile.current_weight || 'unknown'} kg
 Goal: ${profile.goal || 'not specified'}
 Calories: ${calories || 'not calculated'}
 
-STRICT RULES:
+Rules:
 Answer immediately.
 Give practical advice first.
-Do not ask questions at the start.
-Do not repeat greetings.
-Do not say "it depends".
-Do not use markdown, bullets, emojis, stars, or headings.
-Plain human text only.
-Ask at most one short question at the end only if truly necessary.
+Never ask more than one question.
+Never say "tell me more".
+No markdown, bullets, emojis, or symbols.
+Plain human text.
 `;
 
   const payload = {
@@ -179,19 +156,23 @@ Ask at most one short question at the end only if truly necessary.
     const result = await response.json();
     const raw = result?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    if (!raw || raw.length < 40) {
-      return humanFallback(profile, intent);
+    if (raw) {
+      return sanitize(raw);
     }
 
-    return sanitize(raw);
-  } catch (error) {
-    console.error('Gemini Error:', error);
-    return humanFallback(profile, intent);
+    // LAST RESORT (specific, not generic)
+    if (intent === 'diet' || intent === 'lose') {
+      return `For weight loss, start your day with protein and fiber, keep lunch balanced with vegetables and lean protein, and eat a light dinner. Avoid sugar, fried food, and late-night snacking.`;
+    }
+
+    return `I can help with diet, weight goals, or health concerns.`;
+  } catch {
+    return `For your health goals, focus on regular meals, adequate protein, and hydration. Let me know if you want a meal plan or guidance for a specific condition.`;
   }
 }
 
 /* -------------------------------------------------------------------------- */
-/*                               GET Chat                                      */
+/* GET Chat                                                                    */
 /* -------------------------------------------------------------------------- */
 
 export async function GET(request: NextRequest) {
@@ -226,7 +207,7 @@ export async function GET(request: NextRequest) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                               POST Chat                                     */
+/* POST Chat                                                                   */
 /* -------------------------------------------------------------------------- */
 
 export async function POST(request: NextRequest) {
