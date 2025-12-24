@@ -25,10 +25,10 @@ interface UserProfile {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Sanitizer (NO markdown possible)                                            */
+/* Text Sanitizer (NO markdown, NO bullets, NO stars)                          */
 /* -------------------------------------------------------------------------- */
 
-function sanitizeAiText(text: string): string {
+function sanitize(text: string): string {
   return text
     .replace(/^#{1,6}\s*/gm, '')
     .replace(/\*\*(.*?)\*\*/g, '$1')
@@ -36,31 +36,28 @@ function sanitizeAiText(text: string): string {
     .replace(/^\d+\.\s*/gm, '')
     .replace(/^[-•]\s*/gm, '')
     .replace(/[⭐★]/g, '')
-    .replace(/can you explain.*$/gi, '')
-    .replace(/tell me more.*$/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
 /* -------------------------------------------------------------------------- */
-/* Intent Detection                                                            */
+/* Intent Detection                                                           */
 /* -------------------------------------------------------------------------- */
 
 function detectIntent(query: string) {
   const q = query.toLowerCase();
 
   if (/^(hi|hello|hey)$/.test(q)) return 'greeting';
-  if (/lose|fat|slim|weight loss/.test(q)) return 'weight_loss';
-  if (/gain|bulk|muscle|weight gain/.test(q)) return 'weight_gain';
-  if (/thyroid|diabetes|pcod|bp|cholesterol|pain|acidity|bloating/.test(q))
+  if (/lose|fat|slim|weight loss/.test(q)) return 'lose';
+  if (/gain|bulk|muscle|weight gain/.test(q)) return 'gain';
+  if (/thyroid|diabetes|pcod|bp|cholesterol|pain|bloating|acidity/.test(q))
     return 'medical';
-  if (/diet|food|meal|protein|calorie/.test(q)) return 'nutrition';
 
   return 'general';
 }
 
 /* -------------------------------------------------------------------------- */
-/* Calories                                                                    */
+/* Calorie Calculation                                                        */
 /* -------------------------------------------------------------------------- */
 
 function calculateCalories(profile: UserProfile): number | null {
@@ -75,14 +72,14 @@ function calculateCalories(profile: UserProfile): number | null {
       ? 10 * current_weight + 6.25 * height - 5 * age + 5
       : 10 * current_weight + 6.25 * height - 5 * age - 161;
 
-  const activityMap = {
+  const activity: Record<string, number> = {
     sedentary: 1.2,
     light: 1.375,
     moderate: 1.55,
     active: 1.725,
   };
 
-  let calories = bmr * activityMap[activity_level];
+  let calories = bmr * (activity[activity_level] || 1.2);
 
   if (goal === 'lose_weight') calories -= 400;
   if (goal === 'gain_weight') calories += 400;
@@ -91,36 +88,13 @@ function calculateCalories(profile: UserProfile): number | null {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Safe Fallback (IMPOSSIBLE TO ASK QUESTIONS)                                 */
-/* -------------------------------------------------------------------------- */
-
-function safeDietitianFallback(
-  profile: UserProfile,
-  intent: string
-): string {
-  if (intent === 'weight_loss') {
-    return 'For weight loss, focus on regular meals with enough protein, vegetables, and good hydration. Avoid skipping meals and keep portions steady.';
-  }
-
-  if (intent === 'weight_gain') {
-    return 'For healthy weight gain, eat every 3 to 4 hours and include protein, healthy fats, and carbohydrates in each meal.';
-  }
-
-  if (intent === 'medical') {
-    return 'For health concerns, keep meals light, balanced, and regular. Avoid extreme diets and stay hydrated. If symptoms continue, consult a doctor.';
-  }
-
-  return 'A balanced diet with regular meals, enough protein, fruits, vegetables, and water works well for most people.';
-}
-
-/* -------------------------------------------------------------------------- */
-/* DB Context                                                                  */
+/* Fetch User Context                                                         */
 /* -------------------------------------------------------------------------- */
 
 async function getUserContext(userId: number) {
-  const connection = await getConnection();
+  const db = await getConnection();
 
-  const [rows] = await connection.execute<RowDataPacket[]>(
+  const [rows] = await db.execute<RowDataPacket[]>(
     `
     SELECT goal, age, current_weight, height, gender, activity_level
     FROM users
@@ -129,7 +103,7 @@ async function getUserContext(userId: number) {
     [userId]
   );
 
-  await connection.end();
+  await db.end();
 
   const profile: UserProfile = rows.length ? (rows[0] as UserProfile) : {};
   const calories = calculateCalories(profile);
@@ -138,12 +112,32 @@ async function getUserContext(userId: number) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* AI Reply (NO LOOP, NO QUESTION TRAP)                                        */
+/* HARD HUMAN FALLBACK (NO QUESTIONS LOOP)                                     */
+/* -------------------------------------------------------------------------- */
+
+function humanFallback(profile: UserProfile, intent: string): string {
+  if (intent === 'lose') {
+    return `For weight loss, focus on regular meals with good protein and vegetables. Avoid skipping meals and keep portions steady.`;
+  }
+
+  if (intent === 'gain') {
+    return `For healthy weight gain, eat every 3 to 4 hours and include protein, carbs, and healthy fats in each meal.`;
+  }
+
+  if (intent === 'medical') {
+    return `For your health concern, keep meals light, balanced, and at fixed times. Avoid extreme diets and stay hydrated.`;
+  }
+
+  return `A balanced diet with regular meals, enough protein, fruits, vegetables, and water supports overall health.`;
+}
+
+/* -------------------------------------------------------------------------- */
+/* AI Reply Generator                                                         */
 /* -------------------------------------------------------------------------- */
 
 async function getAiReply(userId: number, query: string): Promise<string> {
   if (!GEMINI_API_KEY) {
-    return 'I am unavailable right now. Please try again later.';
+    return 'Service is temporarily unavailable.';
   }
 
   const { profile, calories } = await getUserContext(userId);
@@ -156,21 +150,20 @@ async function getAiReply(userId: number, query: string): Promise<string> {
   const systemPrompt = `
 You are Dr. Sarah, a real clinical dietitian chatting naturally.
 
-User details:
-Goal: ${profile.goal || 'not specified'}
+User profile:
 Age: ${profile.age || 'unknown'}
 Height: ${profile.height || 'unknown'} cm
 Weight: ${profile.current_weight || 'unknown'} kg
-Activity level: ${profile.activity_level || 'unknown'}
-Calories: ${calories || 'estimated'}
+Goal: ${profile.goal || 'not specified'}
+Calories: ${calories || 'not calculated'}
 
 STRICT RULES:
-Always give advice first.
-Never ask more than one short question.
-Never ask "tell me more".
-Never repeat questions already answered.
-Plain text only. No formatting.
-Friendly and practical tone.
+- Give practical advice immediately
+- Use profile silently
+- Ask at most one short question ONLY if necessary
+- Never repeat questions
+- No markdown, no bullets, no emojis
+- Sound like a human dietitian
 `;
 
   const payload = {
@@ -186,91 +179,100 @@ Friendly and practical tone.
     });
 
     const result = await response.json();
-    const raw = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    if (!raw || raw.length < 10) {
-      return safeDietitianFallback(profile, intent);
+    if (!text || text.length < 25) {
+      return humanFallback(profile, intent);
     }
 
-    return sanitizeAiText(raw);
-  } catch {
-    return safeDietitianFallback(profile, intent);
+    return sanitize(text);
+  } catch (err) {
+    console.error('Gemini Error:', err);
+    return humanFallback(profile, intent);
   }
 }
 
 /* -------------------------------------------------------------------------- */
-/* GET Chat                                                                    */
+/* GET: Chat History                                                          */
 /* -------------------------------------------------------------------------- */
 
 export async function GET(request: NextRequest) {
-  const user = verifyAuth(request);
-  if (!user?.id) {
-    return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
-  }
+  try {
+    const user = verifyAuth(request);
+    if (!user?.id) {
+      return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
+    }
 
-  const connection = await getConnection();
+    const db = await getConnection();
 
-  const [rows] = await connection.execute<RowDataPacket[]>(
-    `
-    SELECT id, sender_id, receiver_id, message, created_at
-    FROM messages
-    WHERE (sender_id = ? AND receiver_id = 0)
-       OR (sender_id = 0 AND receiver_id = ?)
-    ORDER BY created_at ASC
-    `,
-    [user.id, user.id]
-  );
-
-  if (!rows.length) {
-    const welcome = 'Hi, how can I help you today?';
-    await connection.execute(
-      `INSERT INTO messages (sender_id, receiver_id, message)
-       VALUES (0, ?, ?)`,
-      [user.id, welcome]
+    const [rows] = await db.execute<RowDataPacket[]>(
+      `
+      SELECT id, sender_id, receiver_id, message, created_at
+      FROM messages
+      WHERE (sender_id = ? AND receiver_id = 0)
+         OR (sender_id = 0 AND receiver_id = ?)
+      ORDER BY created_at ASC
+      `,
+      [user.id, user.id]
     );
-  }
 
-  await connection.end();
-  return NextResponse.json({ messages: rows });
+    if (!rows.length) {
+      await db.execute(
+        `INSERT INTO messages (sender_id, receiver_id, message)
+         VALUES (0, ?, ?)`,
+        [user.id, 'Hi, how can I help you today?']
+      );
+    }
+
+    await db.end();
+    return NextResponse.json({ messages: rows });
+  } catch (e) {
+    console.error('GET Error', e);
+    return NextResponse.json({ message: 'Failed' }, { status: 500 });
+  }
 }
 
 /* -------------------------------------------------------------------------- */
-/* POST Chat                                                                   */
+/* POST: Send Message                                                         */
 /* -------------------------------------------------------------------------- */
 
 export async function POST(request: NextRequest) {
-  const user = verifyAuth(request);
-  if (!user?.id) {
-    return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
-  }
+  try {
+    const user = verifyAuth(request);
+    if (!user?.id) {
+      return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
+    }
 
-  const body = await request.json();
-  const message = body?.message?.trim();
+    const body = await request.json();
+    const message = body?.message?.trim();
 
-  if (!message) {
-    return NextResponse.json(
-      { message: 'Message cannot be empty' },
-      { status: 400 }
+    if (!message) {
+      return NextResponse.json(
+        { message: 'Message cannot be empty' },
+        { status: 400 }
+      );
+    }
+
+    const db = await getConnection();
+
+    await db.execute(
+      `INSERT INTO messages (sender_id, receiver_id, message)
+       VALUES (?, 0, ?)`,
+      [user.id, message]
     );
+
+    const reply = await getAiReply(user.id, message);
+
+    await db.execute(
+      `INSERT INTO messages (sender_id, receiver_id, message)
+       VALUES (0, ?, ?)`,
+      [user.id, reply]
+    );
+
+    await db.end();
+    return NextResponse.json({ reply });
+  } catch (e) {
+    console.error('POST Error', e);
+    return NextResponse.json({ message: 'Failed' }, { status: 500 });
   }
-
-  const connection = await getConnection();
-
-  await connection.execute(
-    `INSERT INTO messages (sender_id, receiver_id, message)
-     VALUES (?, 0, ?)`,
-    [user.id, message]
-  );
-
-  const aiReply = await getAiReply(user.id, message);
-
-  await connection.execute(
-    `INSERT INTO messages (sender_id, receiver_id, message)
-     VALUES (0, ?, ?)`,
-    [user.id, aiReply]
-  );
-
-  await connection.end();
-
-  return NextResponse.json({ reply: aiReply });
 }
