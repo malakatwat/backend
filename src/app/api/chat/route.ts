@@ -9,7 +9,7 @@ import type { RowDataPacket } from 'mysql2/promise';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_API_URL =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-preview-09-2025:generateContent';
+  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent';
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                       */
@@ -25,7 +25,7 @@ interface UserProfile {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Utils                                                                       */
+/* Sanitizer (NO markdown possible)                                            */
 /* -------------------------------------------------------------------------- */
 
 function sanitizeAiText(text: string): string {
@@ -36,9 +36,15 @@ function sanitizeAiText(text: string): string {
     .replace(/^\d+\.\s*/gm, '')
     .replace(/^[-•]\s*/gm, '')
     .replace(/[⭐★]/g, '')
+    .replace(/can you explain.*$/gi, '')
+    .replace(/tell me more.*$/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
+
+/* -------------------------------------------------------------------------- */
+/* Intent Detection                                                            */
+/* -------------------------------------------------------------------------- */
 
 function detectIntent(query: string) {
   const q = query.toLowerCase();
@@ -85,7 +91,30 @@ function calculateCalories(profile: UserProfile): number | null {
 }
 
 /* -------------------------------------------------------------------------- */
-/* DB Helpers                                                                  */
+/* Safe Fallback (IMPOSSIBLE TO ASK QUESTIONS)                                 */
+/* -------------------------------------------------------------------------- */
+
+function safeDietitianFallback(
+  profile: UserProfile,
+  intent: string
+): string {
+  if (intent === 'weight_loss') {
+    return 'For weight loss, focus on regular meals with enough protein, vegetables, and good hydration. Avoid skipping meals and keep portions steady.';
+  }
+
+  if (intent === 'weight_gain') {
+    return 'For healthy weight gain, eat every 3 to 4 hours and include protein, healthy fats, and carbohydrates in each meal.';
+  }
+
+  if (intent === 'medical') {
+    return 'For health concerns, keep meals light, balanced, and regular. Avoid extreme diets and stay hydrated. If symptoms continue, consult a doctor.';
+  }
+
+  return 'A balanced diet with regular meals, enough protein, fruits, vegetables, and water works well for most people.';
+}
+
+/* -------------------------------------------------------------------------- */
+/* DB Context                                                                  */
 /* -------------------------------------------------------------------------- */
 
 async function getUserContext(userId: number) {
@@ -108,55 +137,17 @@ async function getUserContext(userId: number) {
   return { profile, calories };
 }
 
-async function resolveEffectiveGoal(
-  userId: number,
-  profileGoal?: string,
-  query?: string
-) {
-  const q = query?.toLowerCase() || '';
-
-  if (/weight loss|lose weight/.test(q)) return 'lose_weight';
-  if (/weight gain|gain weight/.test(q)) return 'gain_weight';
-
-  const connection = await getConnection();
-  const [rows] = await connection.execute<RowDataPacket[]>(
-    `
-    SELECT message
-    FROM messages
-    WHERE sender_id = ?
-      AND message IN ('weight loss', 'weight gain')
-    ORDER BY created_at DESC
-    LIMIT 1
-    `,
-    [userId]
-  );
-  await connection.end();
-
-  if (rows.length) {
-    return rows[0].message === 'weight loss'
-      ? 'lose_weight'
-      : 'gain_weight';
-  }
-
-  return profileGoal;
-}
-
 /* -------------------------------------------------------------------------- */
-/* AI Reply                                                                    */
+/* AI Reply (NO LOOP, NO QUESTION TRAP)                                        */
 /* -------------------------------------------------------------------------- */
 
 async function getAiReply(userId: number, query: string): Promise<string> {
   if (!GEMINI_API_KEY) {
-    return 'I am unavailable right now. Please try again.';
+    return 'I am unavailable right now. Please try again later.';
   }
 
   const { profile, calories } = await getUserContext(userId);
   const intent = detectIntent(query);
-  const effectiveGoal = await resolveEffectiveGoal(
-    userId,
-    profile.goal,
-    query
-  );
 
   if (intent === 'greeting') {
     return 'Hi, how can I help you today?';
@@ -165,21 +156,21 @@ async function getAiReply(userId: number, query: string): Promise<string> {
   const systemPrompt = `
 You are Dr. Sarah, a real clinical dietitian chatting naturally.
 
-User context:
-Goal: ${effectiveGoal || 'not specified'}
+User details:
+Goal: ${profile.goal || 'not specified'}
 Age: ${profile.age || 'unknown'}
 Height: ${profile.height || 'unknown'} cm
 Weight: ${profile.current_weight || 'unknown'} kg
 Activity level: ${profile.activity_level || 'unknown'}
-Calories: ${calories || 'not calculated'}
+Calories: ${calories || 'estimated'}
 
-Rules:
+STRICT RULES:
+Always give advice first.
+Never ask more than one short question.
+Never ask "tell me more".
 Never repeat questions already answered.
-Never ask again about goal unless user changes it.
-Health questions are always allowed.
-Plain text only.
-No markdown, no bullets, no emojis.
-Short, human, practical replies.
+Plain text only. No formatting.
+Friendly and practical tone.
 `;
 
   const payload = {
@@ -195,13 +186,15 @@ Short, human, practical replies.
     });
 
     const result = await response.json();
-    const raw =
-      result?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      'Can you explain a bit more?';
+    const raw = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!raw || raw.length < 10) {
+      return safeDietitianFallback(profile, intent);
+    }
 
     return sanitizeAiText(raw);
   } catch {
-    return 'Something went wrong. Please try again.';
+    return safeDietitianFallback(profile, intent);
   }
 }
 
@@ -230,15 +223,11 @@ export async function GET(request: NextRequest) {
 
   if (!rows.length) {
     const welcome = 'Hi, how can I help you today?';
-
     await connection.execute(
       `INSERT INTO messages (sender_id, receiver_id, message)
        VALUES (0, ?, ?)`,
       [user.id, welcome]
     );
-
-    await connection.end();
-    return NextResponse.json({ messages: [] });
   }
 
   await connection.end();
