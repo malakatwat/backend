@@ -16,7 +16,7 @@ const GEMINI_API_URL =
 /* -------------------------------------------------------------------------- */
 
 interface UserProfile {
-  goal?: 'lose_weight' | 'gain_weight';
+  goal?: 'lose_weight' | 'gain_weight' | 'maintenance';
   age?: number;
   current_weight?: number;
   height?: number;
@@ -28,7 +28,7 @@ interface UserProfile {
 /* Utils                                                                       */
 /* -------------------------------------------------------------------------- */
 
-function sanitize(text: string): string {
+function sanitizeText(text: string): string {
   return text
     .replace(/^#{1,6}\s*/gm, '')
     .replace(/\*\*(.*?)\*\*/g, '$1')
@@ -43,12 +43,13 @@ function sanitize(text: string): string {
 function detectIntent(query: string) {
   const q = query.toLowerCase();
 
-  if (/^(hi|hello|hey)$/.test(q)) return 'greeting';
-  if (/meal plan|full day|eat plan/.test(q)) return 'meal_plan';
-  if (/fruit|portion|serve|quantity/.test(q)) return 'portion';
-  if (/lose|weight loss|fat/.test(q)) return 'lose';
-  if (/gain|weight gain|bulk/.test(q)) return 'gain';
-  if (/thyroid|diabetes|pcod|bp|cholesterol/.test(q)) return 'medical';
+  if (/^(hi|hello|hey|hola)$/i.test(q)) return 'greeting';
+  if (/lose|fat|slim|weight loss/.test(q)) return 'weight_loss';
+  if (/gain|bulk|muscle|weight gain/.test(q)) return 'weight_gain';
+  if (/meal plan|full day|diet plan/.test(q)) return 'meal_plan';
+  if (/fruit|portion|serving/.test(q)) return 'portion';
+  if (/thyroid|diabetes|pcod|bp|cholesterol|acidity|pain|bloating/.test(q))
+    return 'medical';
 
   return 'general';
 }
@@ -85,7 +86,7 @@ function calculateCalories(profile: UserProfile): number | null {
 }
 
 /* -------------------------------------------------------------------------- */
-/* User Context                                                                */
+/* DB Helpers                                                                  */
 /* -------------------------------------------------------------------------- */
 
 async function getUserContext(userId: number) {
@@ -109,23 +110,28 @@ async function getUserContext(userId: number) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Hard Answers (NO AI FAILURE)                                                */
+/* Safe Hard Fallback (NEVER ASK QUESTIONS)                                    */
 /* -------------------------------------------------------------------------- */
 
-function forcedAnswer(intent: string, profile: UserProfile) {
+function safeFallback(profile: UserProfile, intent: string): string {
+  if (intent === 'meal_plan' || intent === 'weight_loss') {
+    return `For weight loss, structure your day with three balanced meals and one light snack. 
+Breakfast can include protein and fiber, lunch should focus on vegetables and lean protein, 
+and dinner should be lighter with controlled portions.`;
+  }
+
   if (intent === 'portion') {
-    return `For weight loss, aim for 2 servings of fruit per day. One serving is one medium apple, orange, or one cup of cut fruit. For meals, use this plate method: half vegetables, one quarter protein, and one quarter whole grains. This keeps calories controlled without feeling hungry.`;
+    return `For weight loss, aim for two servings of fruit per day. 
+One serving equals one medium fruit or one cup of chopped fruit. 
+Vegetables can be eaten more freely, especially non-starchy ones.`;
   }
 
-  if (intent === 'meal_plan') {
-    return `Here is a simple full day meal plan for weight loss. Breakfast: oats or eggs with vegetables. Lunch: roti or rice with dal or chicken and salad. Snack: fruit or yogurt. Dinner: light meal with vegetables and protein. Keep oil and sugar minimal.`;
+  if (intent === 'medical') {
+    return `For health concerns, keep meals regular and balanced. 
+Avoid extreme diets and focus on simple, home-cooked foods.`;
   }
 
-  if (intent === 'lose') {
-    return `For weight loss, focus on regular meals, high protein, plenty of vegetables, and controlled portions. Avoid sugary drinks and late-night snacking.`;
-  }
-
-  return `For your health goals, focus on balanced meals, regular timing, and hydration.`;
+  return `A balanced diet with regular meals, enough protein, vegetables, and hydration works well for most people.`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -133,6 +139,10 @@ function forcedAnswer(intent: string, profile: UserProfile) {
 /* -------------------------------------------------------------------------- */
 
 async function getAiReply(userId: number, query: string): Promise<string> {
+  if (!GEMINI_API_KEY) {
+    return 'I am unavailable right now.';
+  }
+
   const { profile, calories } = await getUserContext(userId);
   const intent = detectIntent(query);
 
@@ -140,49 +150,48 @@ async function getAiReply(userId: number, query: string): Promise<string> {
     return 'Hi, how can I help you today?';
   }
 
-  if (!GEMINI_API_KEY) {
-    return forcedAnswer(intent, profile);
-  }
-
   const systemPrompt = `
-You are Dr. Sarah, a real dietitian chatting like WhatsApp.
+You are a human nutrition assistant working with a licensed dietitian.
 
 User profile:
+Goal: ${profile.goal || 'not specified'}
 Age: ${profile.age || 'unknown'}
 Height: ${profile.height || 'unknown'} cm
 Weight: ${profile.current_weight || 'unknown'} kg
-Goal: ${profile.goal || 'not specified'}
+Activity level: ${profile.activity_level || 'unknown'}
 Calories: ${calories || 'not calculated'}
 
 Rules:
-Answer immediately.
-Give advice first.
-Ask max one question at the end only if needed.
+Answer exactly what the user asks.
+Do not repeat questions.
+Do not ask for information already known.
 No markdown, no bullets, no emojis.
-Plain human language.
+Sound human and professional.
+End with at most one optional short follow-up.
 `;
+
+  const payload = {
+    contents: [{ parts: [{ text: query }] }],
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+  };
 
   try {
     const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: query }] }],
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-      }),
+      body: JSON.stringify(payload),
     });
 
     const result = await response.json();
     const raw = result?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    if (raw && raw.length > 20) {
-      return sanitize(raw);
+    if (!raw || raw.length < 20) {
+      return safeFallback(profile, intent);
     }
 
-    // FORCE RESPONSE IF AI IS WEAK
-    return forcedAnswer(intent, profile);
+    return sanitizeText(raw);
   } catch {
-    return forcedAnswer(intent, profile);
+    return safeFallback(profile, intent);
   }
 }
 
