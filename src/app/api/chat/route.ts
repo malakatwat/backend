@@ -32,14 +32,31 @@ type ActiveIntent =
   | 'general';
 
 /* -------------------------------------------------------------------------- */
-/* In-Memory Chat Context (Short-Term Memory)                                  */
+/* FOOD VOCABULARY (NOT USER DATA)                                             */
+/* Can later be loaded from DB / JSON / API                                   */
+/* -------------------------------------------------------------------------- */
+
+function loadFoodVocabulary(): Record<string, string[]> {
+  return {
+    oats: ['oats', 'oatmeal', 'rolled oats', 'oat flour'],
+    peanut: ['peanut', 'peanuts', 'peanut butter'],
+    milk: ['milk', 'dairy', 'curd', 'yogurt', 'cheese'],
+    egg: ['egg', 'eggs'],
+    soy: ['soy', 'soya'],
+    gluten: ['wheat', 'barley', 'rye'],
+    fish: ['fish', 'seafood'],
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Short-Term Memory (PER USER)                                                */
 /* -------------------------------------------------------------------------- */
 
 const chatMemory = new Map<
   number,
   {
     activeIntent: ActiveIntent | null;
-    allergies: string[];
+    allergies: string[]; // base allergen keys only
   }
 >();
 
@@ -70,7 +87,7 @@ function sanitizeText(text: string): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Intent Detection (LATEST QUERY WINS)                                        */
+/* Intent Detection                                                            */
 /* -------------------------------------------------------------------------- */
 
 function detectIntent(query: string): ActiveIntent | null {
@@ -86,22 +103,49 @@ function detectIntent(query: string): ActiveIntent | null {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Allergy Detection                                                           */
+/* Allergy Detection (Dynamic User Input)                                      */
 /* -------------------------------------------------------------------------- */
 
-function detectAllergies(query: string): string[] {
-  const allergens = [
-    'peanut',
-    'milk',
-    'egg',
-    'soy',
-    'gluten',
-    'seafood',
-    'fish',
-  ];
-
+function detectUserAllergies(query: string): string[] {
+  const vocabulary = loadFoodVocabulary();
   const q = query.toLowerCase();
-  return allergens.filter(a => q.includes(a));
+  const found: string[] = [];
+
+  for (const [base, aliases] of Object.entries(vocabulary)) {
+    if (aliases.some(a => q.includes(a))) {
+      found.push(base);
+    }
+  }
+
+  return found;
+}
+
+/* -------------------------------------------------------------------------- */
+/* HARD ALLERGY ENFORCEMENT                                                    */
+/* -------------------------------------------------------------------------- */
+
+function enforceAllergyRules(
+  query: string,
+  userAllergies: string[]
+): string | null {
+  const vocabulary = loadFoodVocabulary();
+  const q = query.toLowerCase();
+
+  for (const allergy of userAllergies) {
+    const aliases = vocabulary[allergy] || [];
+
+    if (aliases.some(a => q.includes(a))) {
+      return sanitizeText(
+        `Because you have a ${allergy} allergy, foods containing ${allergy}, such as ${aliases.join(
+          ', '
+        )}, are not safe for you. Consuming them may trigger allergic reactions.
+
+For meals or diet plans, these foods should be completely avoided and replaced with safe alternatives.`
+      );
+    }
+  }
+
+  return null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -160,54 +204,32 @@ async function getUserContext(userId: number) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Safe Hard Fallback                                                          */
-/* -------------------------------------------------------------------------- */
-
-function safeFallback(intent: ActiveIntent): string {
-  if (intent === 'weight_loss') {
-    return 'For weight loss, focus on regular meals with controlled portions, adequate protein, vegetables, and limited processed foods.';
-  }
-
-  if (intent === 'weight_gain') {
-    return 'For weight gain, prioritize calorie-dense meals with sufficient protein, healthy fats, and consistent meal timing.';
-  }
-
-  if (intent === 'maintenance') {
-    return 'For weight maintenance, keep meals balanced, portions consistent, and activity regular.';
-  }
-
-  if (intent === 'medical') {
-    return 'For health concerns, focus on simple, balanced meals and avoid extreme dietary changes.';
-  }
-
-  return 'A balanced diet with regular meals and adequate hydration works well for most people.';
-}
-
-/* -------------------------------------------------------------------------- */
 /* AI Reply                                                                    */
 /* -------------------------------------------------------------------------- */
 
 async function getAiReply(userId: number, query: string): Promise<string> {
-  if (!GEMINI_API_KEY) {
-    return 'I am unavailable right now.';
-  }
+  if (!GEMINI_API_KEY) return 'I am unavailable right now.';
 
   const { profile, calories } = await getUserContext(userId);
   const chatContext = getChatContext(userId);
 
-  // Detect & switch intent instantly
+  // Update intent (latest query wins)
   const detectedIntent = detectIntent(query);
-  if (detectedIntent) {
-    chatContext.activeIntent = detectedIntent;
-  }
+  if (detectedIntent) chatContext.activeIntent = detectedIntent;
 
-  // Detect allergies
-  const foundAllergies = detectAllergies(query);
-  foundAllergies.forEach(a => {
+  // Update user allergies dynamically
+  detectUserAllergies(query).forEach(a => {
     if (!chatContext.allergies.includes(a)) {
       chatContext.allergies.push(a);
     }
   });
+
+  // HARD allergy block (before AI)
+  const allergyViolation = enforceAllergyRules(
+    query,
+    chatContext.allergies
+  );
+  if (allergyViolation) return allergyViolation;
 
   const activeIntent =
     chatContext.activeIntent ||
@@ -222,13 +244,6 @@ You are a professional human nutrition assistant working with a licensed dietiti
 
 ACTIVE INTENT: ${activeIntent}
 
-User profile:
-Age: ${profile.age || 'unknown'}
-Height: ${profile.height || 'unknown'} cm
-Weight: ${profile.current_weight || 'unknown'} kg
-Activity level: ${profile.activity_level || 'unknown'}
-Calories: ${calories || 'not calculated'}
-
 Known allergies: ${
     chatContext.allergies.length
       ? chatContext.allergies.join(', ')
@@ -236,13 +251,12 @@ Known allergies: ${
   }
 
 STRICT RULES:
-- Always answer based on ACTIVE INTENT.
-- Instantly switch intent only if user asks a different type.
-- Respect allergies strictly.
-- If user asks for an allergic food: explain risk, warn clearly, and suggest a safe alternative.
+- Never recommend foods that match known allergies or their variants.
+- If a meal or diet plan would normally include such foods, explicitly avoid and replace them.
+- Always warn clearly if an allergic food is part of the discussion.
 - Answer exactly what the user asks.
 - No markdown, no bullets, no emojis.
-- Sound human, calm, and professional.
+- Sound calm, human, and professional.
 `;
 
   const payload = {
@@ -260,13 +274,9 @@ STRICT RULES:
     const result = await response.json();
     const raw = result?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    if (!raw || raw.length < 20) {
-      return safeFallback(activeIntent);
-    }
-
-    return sanitizeText(raw);
+    return raw ? sanitizeText(raw) : 'Please try again.';
   } catch {
-    return safeFallback(activeIntent);
+    return 'Please try again.';
   }
 }
 
@@ -276,9 +286,8 @@ STRICT RULES:
 
 export async function GET(request: NextRequest) {
   const user = verifyAuth(request);
-  if (!user?.id) {
+  if (!user?.id)
     return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
-  }
 
   const connection = await getConnection();
 
@@ -293,14 +302,6 @@ export async function GET(request: NextRequest) {
     [user.id, user.id]
   );
 
-  if (!rows.length) {
-    await connection.execute(
-      `INSERT INTO messages (sender_id, receiver_id, message)
-       VALUES (0, ?, ?)`,
-      [user.id, 'Hi, how can I help you today?']
-    );
-  }
-
   await connection.end();
   return NextResponse.json({ messages: rows });
 }
@@ -311,19 +312,17 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   const user = verifyAuth(request);
-  if (!user?.id) {
+  if (!user?.id)
     return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
-  }
 
   const body = await request.json();
   const message = body?.message?.trim();
 
-  if (!message) {
+  if (!message)
     return NextResponse.json(
       { message: 'Message cannot be empty' },
       { status: 400 }
     );
-  }
 
   const connection = await getConnection();
 
