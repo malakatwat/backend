@@ -24,6 +24,35 @@ interface UserProfile {
   activity_level?: 'sedentary' | 'light' | 'moderate' | 'active';
 }
 
+type ActiveIntent =
+  | 'weight_loss'
+  | 'weight_gain'
+  | 'maintenance'
+  | 'medical'
+  | 'general';
+
+/* -------------------------------------------------------------------------- */
+/* In-Memory Chat Context (Short-Term Memory)                                  */
+/* -------------------------------------------------------------------------- */
+
+const chatMemory = new Map<
+  number,
+  {
+    activeIntent: ActiveIntent | null;
+    allergies: string[];
+  }
+>();
+
+function getChatContext(userId: number) {
+  if (!chatMemory.has(userId)) {
+    chatMemory.set(userId, {
+      activeIntent: null,
+      allergies: [],
+    });
+  }
+  return chatMemory.get(userId)!;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Utils                                                                       */
 /* -------------------------------------------------------------------------- */
@@ -40,18 +69,39 @@ function sanitizeText(text: string): string {
     .trim();
 }
 
-function detectIntent(query: string) {
+/* -------------------------------------------------------------------------- */
+/* Intent Detection (LATEST QUERY WINS)                                        */
+/* -------------------------------------------------------------------------- */
+
+function detectIntent(query: string): ActiveIntent | null {
   const q = query.toLowerCase();
 
-  if (/^(hi|hello|hey|hola)$/i.test(q)) return 'greeting';
   if (/lose|fat|slim|weight loss/.test(q)) return 'weight_loss';
   if (/gain|bulk|muscle|weight gain/.test(q)) return 'weight_gain';
-  if (/meal plan|full day|diet plan/.test(q)) return 'meal_plan';
-  if (/fruit|portion|serving/.test(q)) return 'portion';
+  if (/maintain|maintenance/.test(q)) return 'maintenance';
   if (/thyroid|diabetes|pcod|bp|cholesterol|acidity|pain|bloating/.test(q))
     return 'medical';
 
-  return 'general';
+  return null;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Allergy Detection                                                           */
+/* -------------------------------------------------------------------------- */
+
+function detectAllergies(query: string): string[] {
+  const allergens = [
+    'peanut',
+    'milk',
+    'egg',
+    'soy',
+    'gluten',
+    'seafood',
+    'fish',
+  ];
+
+  const q = query.toLowerCase();
+  return allergens.filter(a => q.includes(a));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -110,28 +160,27 @@ async function getUserContext(userId: number) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Safe Hard Fallback (NEVER ASK QUESTIONS)                                    */
+/* Safe Hard Fallback                                                          */
 /* -------------------------------------------------------------------------- */
 
-function safeFallback(profile: UserProfile, intent: string): string {
-  if (intent === 'meal_plan' || intent === 'weight_loss') {
-    return `For weight loss, structure your day with three balanced meals and one light snack. 
-Breakfast can include protein and fiber, lunch should focus on vegetables and lean protein, 
-and dinner should be lighter with controlled portions.`;
+function safeFallback(intent: ActiveIntent): string {
+  if (intent === 'weight_loss') {
+    return 'For weight loss, focus on regular meals with controlled portions, adequate protein, vegetables, and limited processed foods.';
   }
 
-  if (intent === 'portion') {
-    return `For weight loss, aim for two servings of fruit per day. 
-One serving equals one medium fruit or one cup of chopped fruit. 
-Vegetables can be eaten more freely, especially non-starchy ones.`;
+  if (intent === 'weight_gain') {
+    return 'For weight gain, prioritize calorie-dense meals with sufficient protein, healthy fats, and consistent meal timing.';
+  }
+
+  if (intent === 'maintenance') {
+    return 'For weight maintenance, keep meals balanced, portions consistent, and activity regular.';
   }
 
   if (intent === 'medical') {
-    return `For health concerns, keep meals regular and balanced. 
-Avoid extreme diets and focus on simple, home-cooked foods.`;
+    return 'For health concerns, focus on simple, balanced meals and avoid extreme dietary changes.';
   }
 
-  return `A balanced diet with regular meals, enough protein, vegetables, and hydration works well for most people.`;
+  return 'A balanced diet with regular meals and adequate hydration works well for most people.';
 }
 
 /* -------------------------------------------------------------------------- */
@@ -144,30 +193,56 @@ async function getAiReply(userId: number, query: string): Promise<string> {
   }
 
   const { profile, calories } = await getUserContext(userId);
-  const intent = detectIntent(query);
+  const chatContext = getChatContext(userId);
 
-  if (intent === 'greeting') {
-    return 'Hi, how can I help you today?';
+  // Detect & switch intent instantly
+  const detectedIntent = detectIntent(query);
+  if (detectedIntent) {
+    chatContext.activeIntent = detectedIntent;
   }
 
+  // Detect allergies
+  const foundAllergies = detectAllergies(query);
+  foundAllergies.forEach(a => {
+    if (!chatContext.allergies.includes(a)) {
+      chatContext.allergies.push(a);
+    }
+  });
+
+  const activeIntent =
+    chatContext.activeIntent ||
+    (profile.goal === 'lose_weight'
+      ? 'weight_loss'
+      : profile.goal === 'gain_weight'
+      ? 'weight_gain'
+      : 'maintenance');
+
   const systemPrompt = `
-You are a human nutrition assistant working with a licensed dietitian.
+You are a professional human nutrition assistant working with a licensed dietitian.
+
+ACTIVE INTENT: ${activeIntent}
 
 User profile:
-Goal: ${profile.goal || 'not specified'}
 Age: ${profile.age || 'unknown'}
 Height: ${profile.height || 'unknown'} cm
 Weight: ${profile.current_weight || 'unknown'} kg
 Activity level: ${profile.activity_level || 'unknown'}
 Calories: ${calories || 'not calculated'}
 
-Rules:
-Answer exactly what the user asks.
-Do not repeat questions.
-Do not ask for information already known.
-No markdown, no bullets, no emojis.
-Sound human and professional.
-End with at most one optional short follow-up.
+Known allergies: ${
+    chatContext.allergies.length
+      ? chatContext.allergies.join(', ')
+      : 'None'
+  }
+
+STRICT RULES:
+- Always answer based on ACTIVE INTENT.
+- Instantly switch intent only if user asks a different type.
+- Respect allergies strictly.
+- If user asks for an allergic food: explain risk, warn clearly, and suggest a safe alternative.
+- Answer exactly what the user asks.
+- No markdown, no bullets, no emojis.
+- Sound human, calm, and professional.
 `;
 
   const payload = {
@@ -186,12 +261,12 @@ End with at most one optional short follow-up.
     const raw = result?.candidates?.[0]?.content?.parts?.[0]?.text;
 
     if (!raw || raw.length < 20) {
-      return safeFallback(profile, intent);
+      return safeFallback(activeIntent);
     }
 
     return sanitizeText(raw);
   } catch {
-    return safeFallback(profile, intent);
+    return safeFallback(activeIntent);
   }
 }
 
