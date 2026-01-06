@@ -8,7 +8,7 @@ import type { RowDataPacket } from 'mysql2/promise';
 /* -------------------------------------------------------------------------- */
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_API_URL =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                      */
@@ -23,10 +23,8 @@ interface UserProfile {
   allergies?: string; // JSON string in DB
 }
 
-type ActiveIntent = 'weight_loss' | 'weight_gain' | 'maintenance' | 'medical' | 'general';
-
 /* -------------------------------------------------------------------------- */
-/* FOOD VOCABULARY & ALIASES                                                  */
+/* ALLERGY DICTIONARY                                                         */
 /* -------------------------------------------------------------------------- */
 const ALLERGY_VOCABULARY: Record<string, string[]> = {
   oats: ['oats', 'oatmeal', 'rolled oats', 'oat flour', 'muesli'],
@@ -42,6 +40,7 @@ const ALLERGY_VOCABULARY: Record<string, string[]> = {
 /* Utils                                                                      */
 /* -------------------------------------------------------------------------- */
 function sanitizeText(text: string): string {
+  // Removes all robotic markdown formatting to keep it human-like
   return text
     .replace(/^#{1,6}\s*/gm, '')
     .replace(/\*\*(.*?)\*\*/g, '$1')
@@ -53,43 +52,18 @@ function sanitizeText(text: string): string {
     .trim();
 }
 
-function detectIntent(query: string): ActiveIntent | null {
-  const q = query.toLowerCase();
-  if (/lose|fat|slim|weight loss/.test(q)) return 'weight_loss';
-  if (/gain|bulk|muscle|weight gain/.test(q)) return 'weight_gain';
-  if (/maintain|maintenance/.test(q)) return 'maintenance';
-  if (/thyroid|diabetes|pcod|bp|cholesterol|acidity|pain|bloating/.test(q)) return 'medical';
-  return null;
-}
-
-function detectUserAllergies(query: string): string[] {
-  const q = query.toLowerCase();
-  const found: string[] = [];
-  for (const [base, aliases] of Object.entries(ALLERGY_VOCABULARY)) {
-    if (aliases.some(a => q.includes(a))) {
-      found.push(base);
-    }
-  }
-  return found;
-}
-
 /**
- * HARD ALLERGY ENFORCEMENT
- * Checks query against the user's stored base allergies and all their aliases.
+ * Scans text for any mention of allergens or their aliases.
  */
-function enforceAllergyRules(query: string, userAllergies: string[]): string | null {
-  const q = query.toLowerCase();
-  for (const allergy of userAllergies) {
-    const aliases = ALLERGY_VOCABULARY[allergy] || [allergy];
-    const matchedAlias = aliases.find(a => q.includes(a));
-
-    if (matchedAlias) {
-      return sanitizeText(
-        `Warning: You have a registered ${allergy} allergy. Since ${matchedAlias} is a form of ${allergy}, it is not safe for you. Please avoid this and choose a safe alternative.`
-      );
+function detectAllergyKeys(text: string): string[] {
+  const q = text.toLowerCase();
+  const detected: string[] = [];
+  for (const [base, aliases] of Object.entries(ALLERGY_VOCABULARY)) {
+    if (aliases.some(alias => q.includes(alias))) {
+      detected.push(base);
     }
   }
-  return null;
+  return detected;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -127,15 +101,15 @@ async function getUserContext(userId: number) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* AI Reply with History & Persistent Memory                                  */
+/* AI Reply with Deep History & Intent Priority                               */
 /* -------------------------------------------------------------------------- */
 async function getAiReply(userId: number, query: string): Promise<string> {
   if (!GEMINI_API_KEY) return 'I am unavailable right now.';
 
   const { profile, calories, allergies: savedAllergies } = await getUserContext(userId);
   
-  // 1. Update Allergy List in DB if new ones are mentioned
-  const newlyDetected = detectUserAllergies(query);
+  // 1. Update Allergy List in DB if new ones are mentioned in current query
+  const newlyDetected = detectAllergyKeys(query);
   let updatedAllergies = savedAllergies;
   if (newlyDetected.length > 0) {
     updatedAllergies = Array.from(new Set([...savedAllergies, ...newlyDetected]));
@@ -144,16 +118,12 @@ async function getAiReply(userId: number, query: string): Promise<string> {
     await connection.end();
   }
 
-  // 2. HARD allergy block (checks current query vs all known aliases)
-  const allergyViolation = enforceAllergyRules(query, updatedAllergies);
-  if (allergyViolation) return allergyViolation;
-
-  // 3. Fetch Last 5 Messages for Conversation Memory
+  // 2. Fetch Last 10 Messages for Deep Contextual Memory
   const connection = await getConnection();
   const [historyRows] = await connection.execute<RowDataPacket[]>(
     `SELECT sender_id, message FROM messages 
      WHERE (sender_id = ? AND receiver_id = 0) OR (sender_id = 0 AND receiver_id = ?) 
-     ORDER BY created_at DESC LIMIT 5`,
+     ORDER BY created_at DESC LIMIT 10`,
     [userId, userId]
   );
   await connection.end();
@@ -163,18 +133,21 @@ async function getAiReply(userId: number, query: string): Promise<string> {
     parts: [{ text: row.message }]
   }));
 
-  const activeIntent = detectIntent(query) || profile.goal || 'general';
-
+  // 3. Human-Centric Dietitian Prompt
   const systemPrompt = `
-You are a professional dietitian assistant. 
-USER PROFILE: Goal is ${activeIntent}, Calories: ${calories || 'not set'}.
-STRICT ALLERGY LIST: ${updatedAllergies.length ? updatedAllergies.join(', ') : 'None'}.
+You are a highly experienced human Dietitian. You have a warm, professional, and observant personality.
 
-STRICT RULES:
-- If a user mentions a food from their allergy list or any related form of it (e.g., oatmeal for an oat allergy), you MUST refuse and warn them.
-- Refer to the chat history to stay consistent. If they asked for a plan previously, build upon it.
-- No markdown, no bullets, no emojis.
-- Sound calm, human, and professional.
+USER DATA:
+- Profile Goal: ${profile.goal || 'General Health'}
+- Calculated Daily Calories: ${calories || 'Not set'}
+- Registered Allergies: ${updatedAllergies.length > 0 ? updatedAllergies.join(', ') : 'None'}
+
+STRICT OPERATING RULES:
+1. CONTEXT OVER PROFILE: The chat history is more important than the profile. If the user recently asked for a "weight loss plan" even though their profile says "weight gain", you MUST follow the weight loss request.
+2. ALLERGY MEMORY: You must remember every allergy the user mentions. If they ask for a food they are allergic to (or a variation like oatmeal for an oat allergy), you must firmly but kindly explain why they should avoid it and offer a safe alternative.
+3. BE HUMAN, NOT ROBOTIC: Do not use bullet points, bolding, or markdown. Do not start sentences with "Warning:". Instead, incorporate warnings naturally: "Since we're avoiding oats, let's swap that for a quinoa porridge."
+4. PERSISTENCE: Maintain the flow. If the user just registered an allergy and now asks for a plan, refer back to the plan you were discussing a few messages ago.
+5. Answer concisely in clear paragraphs.
 `;
 
   try {
@@ -188,10 +161,17 @@ STRICT RULES:
     });
 
     const result = await response.json();
+
+    if (result.error) {
+      console.error("Gemini Error:", result.error);
+      return "I'm having a bit of trouble focusing. Could you repeat that?";
+    }
+
     const raw = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-    return raw ? sanitizeText(raw) : 'Please try again.';
-  } catch {
-    return 'I am having trouble connecting. Please try again.';
+    return raw ? sanitizeText(raw) : 'How can I help you with your nutrition today?';
+  } catch (error) {
+    console.error("Server Error:", error);
+    return 'I seem to be offline. Please try again in a moment.';
   }
 }
 
@@ -222,13 +202,13 @@ export async function POST(request: NextRequest) {
   if (!message) return NextResponse.json({ message: 'Message cannot be empty' }, { status: 400 });
 
   const connection = await getConnection();
-  // Store user message
+  // 1. Save User Message to History
   await connection.execute('INSERT INTO messages (sender_id, receiver_id, message) VALUES (?, 0, ?)', [user.id, message]);
 
-  // Get AI response with context
+  // 2. Generate Context-Aware AI Reply
   const aiReply = await getAiReply(user.id, message);
 
-  // Store AI response
+  // 3. Save AI Reply to History
   await connection.execute('INSERT INTO messages (sender_id, receiver_id, message) VALUES (0, ?, ?)', [user.id, aiReply]);
   await connection.end();
 
